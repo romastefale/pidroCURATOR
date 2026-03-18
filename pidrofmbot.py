@@ -31,7 +31,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 id=str(i),
                 photo_url=cover,
                 thumbnail_url=cover,
-                title=f"{title}",
+                title=title,
                 description=f"{artist} • Tap to confirm",
                 caption=f"_{user_name} is listening to..._\n\n♫ Playing: {title}\n★ Artist: {artist}",
                 parse_mode="Markdown"

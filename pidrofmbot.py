@@ -175,7 +175,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     description="♪ Share this song",
 
                     caption=(
-                        f"♬ {user_name} is listening...\n\n"
+                        f"♬ {user_name} is listening to...\n\n"
                         f"♫ *{title}* ({album}) — _{artist}_"
                     ),
                     parse_mode="Markdown"

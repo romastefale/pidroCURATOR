@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-# Alteração 1: Removendo os ":" do TOKEN para o Telegram não rejeitar o Webhook
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
 
 try:
@@ -186,4 +185,131 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def safe_reply_text(target, text, **kwargs):
     try:
         await target.reply_text(text, **kwargs)
-    except telegram.
+    except telegram.error.TelegramError as e:
+        logger.warning(f"Failed to send reply: {e}")
+
+
+async def safe_answer_inline(query, results, **kwargs):
+    try:
+        await query.answer(results, **kwargs)
+    except telegram.error.TelegramError as e:
+        logger.warning(f"Failed to answer inline query: {e}")
+
+
+# =========================
+# HANDLERS
+# =========================
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip()
+
+    if not query or len(query) < 2:
+        await safe_answer_inline(update.inline_query, [], cache_time=0)
+        return
+
+    offset = int(update.inline_query.offset or 0)
+    tracks = await search_deezer(query, index=offset)
+
+    results = []
+    for track in tracks[:20]:
+        try:
+            track_id = str(track["id"])
+            title = escape_markdown(track["title"])
+            artist = escape_markdown(track["artist"]["name"])
+            album = escape_markdown(track.get("album", {}).get("title", ""))
+            cover = track.get("album", {}).get("cover_medium", "https://e-cdns-images.dzcdn.net/images/cover//250x250-000000-80-0-0.jpg")
+            preview_url = track.get("preview", "")
+            track_link = track.get("link", f"https://www.deezer.com/track/{track_id}")
+
+            caption = f"♫ *{title}* — _{artist}_"
+            if album:
+                caption += f"\nAlbum: {album}"
+
+            keyboard = []
+            if preview_url:
+                keyboard.append(InlineKeyboardButton("▶️ Preview", url=preview_url))
+            keyboard.append(InlineKeyboardButton("🎵 Deezer", url=track_link))
+
+            results.append(
+                InlineQueryResultPhoto(
+                    id=track_id,
+                    photo_url=cover,
+                    thumbnail_url=cover,
+                    title=track["title"],
+                    description=track["artist"]["name"],
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([keyboard])
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Error building result for track: {e}")
+            continue
+
+    next_offset = str(offset + 20) if len(tracks) >= 20 else ""
+    await safe_answer_inline(
+        update.inline_query,
+        results,
+        cache_time=30,
+        next_offset=next_offset
+    )
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        text = update.message.text or ""
+        if text.startswith("/start"):
+            await safe_reply_text(
+                update.message,
+                "Olá! Eu sou o PidroFM Bot 🎵\n\n"
+                "Use-me inline em qualquer chat digitando:\n"
+                "`@seu_bot nome_da_musica`\n\n"
+                "Vou buscar músicas no Deezer para você!",
+                parse_mode="Markdown"
+            )
+        elif text.startswith("/help"):
+            await safe_reply_text(
+                update.message,
+                "Como usar:\n"
+                "1. Em qualquer chat, digite `@seu_bot` seguido do nome da música\n"
+                "2. Selecione a música nos resultados\n"
+                "3. A música será compartilhada no chat!\n\n"
+                "Powered by Deezer 🎶",
+                parse_mode="Markdown"
+            )
+
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(InlineQueryHandler(inline_query_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, message_handler))
+    app.add_handler(CallbackQueryHandler(callback_query_handler))
+    app.add_error_handler(error_handler)
+
+    if WEBHOOK_URL:
+        logger.info(f"Starting webhook on port {PORT}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+            secret_token=WEBHOOK_SECRET,
+        )
+    else:
+        logger.info("Starting polling (no WEBHOOK_URL set)")
+        app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()

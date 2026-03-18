@@ -185,104 +185,265 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def safe_reply_text(target, text, **kwargs):
     try:
         await target.reply_text(text, **kwargs)
-    except telegram.error.TelegramError as e:
-        logger.warning(f"Failed to send reply: {e}")
+    except telegram.error.RetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        try:
+            await target.reply_text(text, **kwargs)
+        except Exception as e2:
+            logger.error(f"safe_reply_text retry failed: {e2}")
+    except telegram.error.Forbidden:
+        logger.warning("Could not send message: user blocked the bot")
+    except Exception as e:
+        logger.error(f"safe_reply_text error: {e}")
 
 
-async def safe_answer_inline(query, results, **kwargs):
+async def safe_reply_photo(target, photo, caption, parse_mode):
     try:
-        await query.answer(results, **kwargs)
-    except telegram.error.TelegramError as e:
-        logger.warning(f"Failed to answer inline query: {e}")
+        await target.reply_photo(photo=photo, caption=caption, parse_mode=parse_mode)
+    except telegram.error.RetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        try:
+            await target.reply_photo(photo=photo, caption=caption, parse_mode=parse_mode)
+        except Exception as e2:
+            logger.error(f"safe_reply_photo retry failed: {e2}")
+    except telegram.error.Forbidden:
+        logger.warning("Could not send photo: user blocked the bot")
+    except Exception as e:
+        logger.error(f"safe_reply_photo error: {e}")
 
 
 # =========================
-# HANDLERS
+# INLINE MODE
 # =========================
 
-async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip()
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not query or len(query) < 2:
-        await safe_answer_inline(update.inline_query, [], cache_time=0)
+    query = update.inline_query.query
+
+    if not query:
         return
 
-    offset = int(update.inline_query.offset or 0)
-    tracks = await search_deezer(query, index=offset)
+    tracks = await search_deezer(query)
+
+    user = update.inline_query.from_user
+    user_name = escape_markdown(user.first_name if user else "Someone")
 
     results = []
-    for track in tracks[:20]:
+
+    for i, track in enumerate(tracks[:10]):
+
         try:
-            track_id = str(track["id"])
+
             title = escape_markdown(track["title"])
             artist = escape_markdown(track["artist"]["name"])
-            album = escape_markdown(track.get("album", {}).get("title", ""))
-            cover = track.get("album", {}).get("cover_medium", "https://e-cdns-images.dzcdn.net/images/cover//250x250-000000-80-0-0.jpg")
-            preview_url = track.get("preview", "")
-            track_link = track.get("link", f"https://www.deezer.com/track/{track_id}")
-
-            caption = f"♫ *{title}* — _{artist}_"
-            if album:
-                caption += f"\nAlbum: {album}"
-
-            keyboard = []
-            if preview_url:
-                keyboard.append(InlineKeyboardButton("▶️ Preview", url=preview_url))
-            keyboard.append(InlineKeyboardButton("🎵 Deezer", url=track_link))
+            cover = track["album"]["cover_big"]
 
             results.append(
+
                 InlineQueryResultPhoto(
-                    id=track_id,
+                    id=str(i),
                     photo_url=cover,
                     thumbnail_url=cover,
-                    title=track["title"],
-                    description=track["artist"]["name"],
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([keyboard])
+
+                    title=f"{track['title']} — {track['artist']['name']}",
+                    description="Tap to share",
+
+                    caption=f"_{user_name} is listening to..._\n\n*{title}*\n_{artist}_\n\n♫ Now Playing",
+                    parse_mode="Markdown"
                 )
             )
+
         except Exception as e:
-            logger.warning(f"Error building result for track: {e}")
+            logger.warning(f"Skipping inline track {i}: {e}")
             continue
 
-    next_offset = str(offset + 20) if len(tracks) >= 20 else ""
-    await safe_answer_inline(
-        update.inline_query,
-        results,
-        cache_time=30,
-        next_offset=next_offset
+    try:
+        await update.inline_query.answer(results, cache_time=5)
+    except telegram.error.BadRequest as e:
+        logger.error(f"Inline answer bad request: {e}")
+    except Exception as e:
+        logger.error(f"Inline answer error: {e}")
+
+
+# =========================
+# BUSCA NO CHAT
+# =========================
+
+async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.message.text
+
+    context.user_data["query"] = query
+    context.user_data["offset"] = 0
+
+    await send_results(update, context)
+
+
+# =========================
+# ENVIAR RESULTADOS
+# =========================
+
+async def send_results(update, context):
+
+    query = context.user_data.get("query")
+    offset = context.user_data.get("offset", 0)
+
+    if not query:
+        await safe_reply_text(update.message, "Please send a search term first.")
+        return
+
+    tracks = await search_deezer(query, offset)
+
+    if not tracks:
+        await safe_reply_text(update.message, "No results found.")
+        return
+
+    context.user_data["tracks"] = tracks
+
+    keyboard = []
+
+    for i, track in enumerate(tracks[:10]):
+        try:
+            title = track["title"]
+            artist = track["artist"]["name"]
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{title} — {artist}",
+                    callback_data=f"track_{i}"
+                )
+            ])
+        except Exception as e:
+            logger.warning(f"Skipping keyboard track {i}: {e}")
+            continue
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "Load more",
+            callback_data="more"
+        )
+    ])
+
+    await safe_reply_text(
+        update.message,
+        "♪ Select the song:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        text = update.message.text or ""
-        if text.startswith("/start"):
-            await safe_reply_text(
-                update.message,
-                "Olá! Eu sou o PidroFM Bot 🎵\n\n"
-                "Use-me inline em qualquer chat digitando:\n"
-                "`@seu_bot nome_da_musica`\n\n"
-                "Vou buscar músicas no Deezer para você!",
-                parse_mode="Markdown"
-            )
-        elif text.startswith("/help"):
-            await safe_reply_text(
-                update.message,
-                "Como usar:\n"
-                "1. Em qualquer chat, digite `@seu_bot` seguido do nome da música\n"
-                "2. Selecione a música nos resultados\n"
-                "3. A música será compartilhada no chat!\n\n"
-                "Powered by Deezer 🎶",
-                parse_mode="Markdown"
-            )
+# =========================
+# MAIS RESULTADOS
+# =========================
+
+async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    cb_query = update.callback_query
+
+    try:
+        await cb_query.answer()
+    except Exception:
+        pass
+
+    search_query = context.user_data.get("query")
+    if not search_query:
+        await safe_reply_text(cb_query.message, "Session expired. Please search again.")
+        return
+
+    context.user_data["offset"] = context.user_data.get("offset", 0) + 10
+
+    tracks = await search_deezer(
+        search_query,
+        context.user_data["offset"]
+    )
+
+    if not tracks:
+        await safe_reply_text(cb_query.message, "No more results.")
+        return
+
+    context.user_data["tracks"] = tracks
+
+    keyboard = []
+
+    for i, track in enumerate(tracks[:10]):
+        try:
+            title = track["title"]
+            artist = track["artist"]["name"]
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{title} — {artist}",
+                    callback_data=f"track_{i}"
+                )
+            ])
+        except Exception as e:
+            logger.warning(f"Skipping more_results track {i}: {e}")
+            continue
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "Load more",
+            callback_data="more"
+        )
+    ])
+
+    await safe_reply_text(
+        cb_query.message,
+        "More results:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
+# =========================
+# ESCOLHER MÚSICA
+# =========================
+
+async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    cb_query = update.callback_query
+
+    try:
+        await cb_query.answer()
+    except Exception:
+        pass
+
+    try:
+        index = int(cb_query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await safe_reply_text(cb_query.message, "Invalid selection. Please search again.")
+        return
+
+    tracks = context.user_data.get("tracks")
+
+    if not tracks:
+        await safe_reply_text(cb_query.message, "Session expired. Please search again.")
+        return
+
+    if index < 0 or index >= len(tracks):
+        await safe_reply_text(cb_query.message, "Track no longer available. Please search again.")
+        return
+
+    track = tracks[index]
+    title = None
+    artist = None
+    cover = None
+    user_name = None
+
+    try:
+        title = escape_markdown(track["title"])
+        artist = escape_markdown(track["artist"]["name"])
+        cover = track["album"]["cover_big"]
+        user_name = escape_markdown(cb_query.from_user.first_name)
+    except (KeyError, Exception) as e:
+        logger.error(f"select_track data error: {e}")
+        await safe_reply_text(cb_query.message, "Could not load track. Please try again.")
+        return
+
+    await safe_reply_photo(
+        cb_query.message,
+        photo=cover,
+        caption=f"_{user_name} is listening to..._\n\n*{title}*\n_{artist}_\n\n♫ Now Playing",
+        parse_mode="Markdown"
+    )
 
 
 # =========================
@@ -290,24 +451,45 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 # =========================
 
 def main():
-    app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(InlineQueryHandler(inline_query_handler))
-    app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, message_handler))
-    app.add_handler(CallbackQueryHandler(callback_query_handler))
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
+
     app.add_error_handler(error_handler)
 
+    app.add_handler(InlineQueryHandler(inline_query))
+
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, search_music)
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(more_results, pattern="^more$")
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(select_track, pattern=r"^track_\d+$")
+    )
+
     if WEBHOOK_URL:
-        logger.info(f"Starting webhook on port {PORT}")
+        logger.info(f"Starting in webhook mode on port {PORT}")
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
             secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True,
         )
     else:
-        logger.info("Starting polling (no WEBHOOK_URL set)")
+        logger.info("Starting in polling mode")
         app.run_polling(drop_pending_updates=True)
 
 

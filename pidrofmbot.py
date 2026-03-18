@@ -320,7 +320,7 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cb_query.message.reply_photo(
         photo=cover,
         caption=(
-            f"♬ {user_name} is listening...\n\n"
+            f"♬ {user_name} is listening to...\n\n"
             f"♫ *{title}* ({album}) — _{artist}_"
         ),
         parse_mode="Markdown"

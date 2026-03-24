@@ -1,12 +1,11 @@
 import os
 import logging
-import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from google import genai
 from html import escape
 import trafilatura
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,53 +20,54 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Inicialização Gemini
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ================== LOG ==================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 
 # ================== DUMMY SERVER ==================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot Curador Ativo")
+        self.wfile.write(b"Bot Ativo")
     def log_message(self, format, *args): pass
 
 def run_dummy_server():
     port = int(os.getenv("PORT", "8080"))
     HTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
 
-# ================== NÚCLEO DE PROCESSAMENTO ==================
+# ================== EXTRAÇÃO MELHORADA ==================
 
-def extract_article(url):
-    """Extrai o texto real da notícia ignorando lixo do site."""
+def extract_content(url):
+    # Configura um User-Agent para não ser bloqueado por sites como MacMagazine
     downloaded = trafilatura.fetch_url(url)
-    if downloaded:
-        # Extrai texto, título e metadados
-        result = trafilatura.extract(downloaded, include_comments=False, output_format='json')
-        import json
-        return json.loads(result) if result else None
-    return None
+    
+    if not downloaded:
+        return None
 
-def summarize_with_gemini(title, content):
-    """Gera o resumo profissional no estilo pidroNEWS."""
+    # Tenta extrair o conteúdo principal
+    result = trafilatura.extract(
+        downloaded, 
+        include_comments=False,
+        no_fallback=False,
+        include_tables=False
+    )
+    
+    # Busca o título separadamente se falhar no extract
+    import metadata_parser
+    title = ""
     try:
-        prompt = f"""
-        Você é um editor de notícias profissional. 
-        Reescreva o conteúdo abaixo para um post de Telegram, mantendo um tom sério e informativo.
-        
-        TÍTULO ORIGINAL: {title}
-        CONTEÚDO: {content}
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(downloaded, 'html.parser')
+        title = soup.title.string if soup.title else "Notícia"
+    except:
+        title = "Notícia"
 
-        REGRAS:
-        1. Foque nos fatos principais.
-        2. Use parágrafos curtos.
-        3. Adicione contexto e impacto se possível.
-        4. Responda APENAS com o corpo do resumo (sem repetir o título).
-        """
-        
+    return {"text": result, "title": title}
+
+def summarize(title, content):
+    try:
+        prompt = f"Resuma de forma profissional e direta para um canal de notícias no Telegram:\n\nTítulo: {title}\nConteúdo: {content}"
         response = gemini_client.models.generate_content(
             model='gemini-1.5-flash',
             contents=prompt
@@ -75,69 +75,45 @@ def summarize_with_gemini(title, content):
         return response.text.strip()
     except Exception as e:
         logging.error(f"Erro Gemini: {e}")
-        return "Erro ao gerar resumo automático."
+        return None
 
 # ================== HANDLERS ==================
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Segurança: Apenas você pode usar o bot
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    text = update.message.text
-    if not text.startswith("http"):
+    url = update.message.text.strip()
+    msg = await update.message.reply_text("Obtendo conteúdo da Apple... 🍎")
+
+    data = extract_content(url)
+    
+    if not data or not data['text']:
+        await msg.edit_text("❌ Não consegui ler o conteúdo desse link. O site pode estar bloqueando robôs.")
         return
 
-    processing_msg = await update.message.reply_text("Processando link e gerando resumo... ⏳")
+    resumo = summarize(data['title'], data['text'][:5000])
+    
+    if not resumo:
+        await msg.edit_text("❌ Erro ao gerar o resumo com IA.")
+        return
 
-    try:
-        url = text.strip()
-        article_data = extract_article(url)
+    # Formatação exata solicitada
+    final_text = (
+        f"<b>{escape(data['title'])}</b>\n\n"
+        f"<blockquote><i>{escape(resumo)}</i></blockquote>\n\n"
+        f'<i>Via: <a href="{url}">MacMagazine</a></i>'
+    )
 
-        if not article_data or not article_data.get('text'):
-            await processing_msg.edit_text("❌ Não consegui extrair o conteúdo desta URL.")
-            return
-
-        title = article_data.get('title', 'Notícia')
-        content = article_data.get('text')[:4000] # Limite para não estourar o prompt
-        source_name = article_data.get('sitename', 'Fonte')
-
-        # Gera o resumo
-        summary = summarize_with_gemini(title, content)
-
-        # Montagem do Layout solicitado
-        # Título em Negrito
-        # Corpo em Citação + Itálico
-        # Via: Link em Itálico
-        final_post = (
-            f"<b>{escape(title)}</b>\n\n"
-            f"<blockquote><i>{escape(summary)}</i></blockquote>\n\n"
-            f'<i>Via: <a href="{url}">{escape(source_name)}</a></i>'
-        )
-
-        await update.message.reply_text(final_post, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-        await processing_msg.delete()
-
-    except Exception as e:
-        logging.error(f"Erro geral: {e}")
-        await processing_msg.edit_text("❌ Ocorreu um erro ao processar essa notícia.")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text("Olá, Piero! Envie o link de uma notícia e eu preparo o post para você.")
+    await update.message.reply_text(final_text, parse_mode=ParseMode.HTML)
+    await msg.delete()
 
 # ================== MAIN ==================
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    # Monitora qualquer mensagem que pareça um link
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-    print("Bot Curador Online...")
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_url))
     app.run_polling()
 
 if __name__ == "__main__":

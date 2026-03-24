@@ -1,343 +1,144 @@
 import os
-import re
-import time
-import asyncio
 import logging
-import requests
-import telegram.error
-
-from concurrent.futures import ThreadPoolExecutor
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    InlineQueryResultArticle,
-    InputTextMessageContent
-)
-
+import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from google import genai
+from html import escape
+import trafilatura
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Application,
-    InlineQueryHandler,
-    MessageHandler,
-    CallbackQueryHandler,
+    ApplicationBuilder,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ================== ENV ==================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
+# Inicialização Gemini
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-try:
-    PORT = int(os.getenv("PORT", 8443))
-except ValueError:
-    logger.warning("Invalid PORT value, defaulting to 8443")
-    PORT = 8443
+# ================== LOG ==================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-if not TOKEN:
-    raise ValueError("Configure TELEGRAM_TOKEN nas variáveis do Render")
+# ================== DUMMY SERVER ==================
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Curador Ativo")
+    def log_message(self, format, *args): pass
 
-session = requests.Session()
-cache = {}
-CACHE_MAX_SIZE = 500
-_executor = ThreadPoolExecutor(max_workers=4)
+def run_dummy_server():
+    port = int(os.getenv("PORT", "8080"))
+    HTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
 
+# ================== NÚCLEO DE PROCESSAMENTO ==================
 
-def escape_markdown(text):
-    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+def extract_article(url):
+    """Extrai o texto real da notícia ignorando lixo do site."""
+    downloaded = trafilatura.fetch_url(url)
+    if downloaded:
+        # Extrai texto, título e metadados
+        result = trafilatura.extract(downloaded, include_comments=False, output_format='json')
+        import json
+        return json.loads(result) if result else None
+    return None
 
-
-def evict_cache():
-    if len(cache) >= CACHE_MAX_SIZE:
-        oldest_keys = list(cache.keys())[:100]
-        for k in oldest_keys:
-            del cache[k]
-
-
-def score_track(track, query):
+def summarize_with_gemini(title, content):
+    """Gera o resumo profissional no estilo pidroNEWS."""
     try:
-        title = track["title"].lower()
-        artist = track["artist"]["name"].lower()
-        q = query.lower()
+        prompt = f"""
+        Você é um editor de notícias profissional. 
+        Reescreva o conteúdo abaixo para um post de Telegram, mantendo um tom sério e informativo.
+        
+        TÍTULO ORIGINAL: {title}
+        CONTEÚDO: {content}
 
-        score = 0
-
-        if q in f"{title} {artist}":
-            score += 100
-        if q in title:
-            score += 60
-        if q in artist:
-            score += 40
-        if title.startswith(q):
-            score += 30
-
-        return score
-    except (KeyError, AttributeError):
-        return 0
-
-
-def _search_deezer_sync(query, index=0):
-
-    query = re.sub(r"[-_]+", " ", query)
-    query = re.sub(r"\s+", " ", query).strip()
-
-    cache_key = f"{query}_{index}"
-
-    if cache_key in cache:
-        return cache[cache_key]
-
-    for attempt in range(3):
-        try:
-            r = session.get(
-                "https://api.deezer.com/search",
-                params={"q": query, "index": index},
-                timeout=5
-            )
-
-            if r.status_code != 200:
-                return []
-
-            tracks = r.json().get("data", [])
-
-            tracks = sorted(
-                tracks,
-                key=lambda t: score_track(t, query),
-                reverse=True
-            )
-
-            evict_cache()
-            cache[cache_key] = tracks
-
-            return tracks
-
-        except Exception:
-            time.sleep(1)
-
-    return []
-
-
-async def search_deezer(query, index=0):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, _search_deezer_sync, query, index)
-
-
-# =========================
-# INLINE MODE (FIX FINAL)
-# =========================
-
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.inline_query.query
-
-    if not query:
-        return
-
-    tracks = await search_deezer(query)
-
-    user = update.inline_query.from_user
-    user_name = escape_markdown(user.first_name if user else "Someone")
-
-    results = []
-
-    for i, track in enumerate(tracks[:10]):
-
-        try:
-            title = escape_markdown(track["title"])
-            artist = escape_markdown(track["artist"]["name"])
-            album = escape_markdown(track["album"]["title"])
-            cover = track["album"]["cover_big"]
-
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(i),
-                    title=f"{track['title']} — {track['artist']['name']}",
-                    description=f"Album: {track['album']['title']}",
-                    thumbnail_url=cover,
-                    input_message_content=InputTextMessageContent(
-                        message_text=(
-                            f"[\\u200b]({cover})\n"
-                            f"♫ {user_name} is listening to...\n\n"
-                            f"♬ *{title}* - _{album} — {artist}_"
-                        ),
-                        parse_mode="Markdown",
-                        disable_web_page_preview=False
-                    )
-                )
-            )
-
-        except Exception:
-            continue
-
-    await update.inline_query.answer(results, cache_time=5)
-
-
-# =========================
-# RESTANTE (INALTERADO)
-# =========================
-
-async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.message.text
-
-    context.user_data["query"] = query
-    context.user_data["offset"] = 0
-
-    await send_results(update, context)
-
-
-async def send_results(update, context):
-
-    query = context.user_data.get("query")
-    offset = context.user_data.get("offset", 0)
-
-    if not query:
-        return
-
-    tracks = await search_deezer(query, offset)
-
-    if not tracks:
-        await update.message.reply_text("No results found.")
-        return
-
-    context.user_data["tracks"] = tracks
-
-    keyboard = []
-
-    for i, track in enumerate(tracks[:10]):
-
-        title = track["title"]
-        artist = track["artist"]["name"]
-
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{title} — {artist}",
-                callback_data=f"track_{i}"
-            )
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "Load more",
-            callback_data="more"
+        REGRAS:
+        1. Foque nos fatos principais.
+        2. Use parágrafos curtos.
+        3. Adicione contexto e impacto se possível.
+        4. Responda APENAS com o corpo do resumo (sem repetir o título).
+        """
+        
+        response = gemini_client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
         )
-    ])
+        return response.text.strip()
+    except Exception as e:
+        logging.error(f"Erro Gemini: {e}")
+        return "Erro ao gerar resumo automático."
 
-    await update.message.reply_text(
-        "♪ Search song...",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+# ================== HANDLERS ==================
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Segurança: Apenas você pode usar o bot
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text.startswith("http"):
+        return
 
-    cb_query = update.callback_query
-    await cb_query.answer()
+    processing_msg = await update.message.reply_text("Processando link e gerando resumo... ⏳")
 
-    search_query = context.user_data.get("query")
+    try:
+        url = text.strip()
+        article_data = extract_article(url)
 
-    context.user_data["offset"] = context.user_data.get("offset", 0) + 10
+        if not article_data or not article_data.get('text'):
+            await processing_msg.edit_text("❌ Não consegui extrair o conteúdo desta URL.")
+            return
 
-    tracks = await search_deezer(
-        search_query,
-        context.user_data["offset"]
-    )
+        title = article_data.get('title', 'Notícia')
+        content = article_data.get('text')[:4000] # Limite para não estourar o prompt
+        source_name = article_data.get('sitename', 'Fonte')
 
-    context.user_data["tracks"] = tracks
+        # Gera o resumo
+        summary = summarize_with_gemini(title, content)
 
-    keyboard = []
-
-    for i, track in enumerate(tracks[:10]):
-
-        title = track["title"]
-        artist = track["artist"]["name"]
-
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{title} — {artist}",
-                callback_data=f"track_{i}"
-            )
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "Load more",
-            callback_data="more"
+        # Montagem do Layout solicitado
+        # Título em Negrito
+        # Corpo em Citação + Itálico
+        # Via: Link em Itálico
+        final_post = (
+            f"<b>{escape(title)}</b>\n\n"
+            f"<blockquote><i>{escape(summary)}</i></blockquote>\n\n"
+            f'<i>Via: <a href="{url}">{escape(source_name)}</a></i>'
         )
-    ])
 
-    await cb_query.message.reply_text(
-        "♪ Search song...",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        await update.message.reply_text(final_post, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+        await processing_msg.delete()
 
+    except Exception as e:
+        logging.error(f"Erro geral: {e}")
+        await processing_msg.edit_text("❌ Ocorreu um erro ao processar essa notícia.")
 
-async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        await update.message.reply_text("Olá, Piero! Envie o link de uma notícia e eu preparo o post para você.")
 
-    cb_query = update.callback_query
-    await cb_query.answer()
-
-    index = int(cb_query.data.split("_")[1])
-    tracks = context.user_data.get("tracks")
-
-    track = tracks[index]
-
-    title = escape_markdown(track["title"])
-    artist = escape_markdown(track["artist"]["name"])
-    album = escape_markdown(track["album"]["title"])
-    cover = track["album"]["cover_big"]
-
-    user_name = escape_markdown(cb_query.from_user.first_name)
-
-    await cb_query.message.reply_photo(
-        photo=cover,
-        caption=(
-            f"♫ {user_name} is listening to...\n\n"
-            f"♬ *{title}* - _{album} — {artist}_"
-        ),
-        parse_mode="Markdown"
-    )
-
+# ================== MAIN ==================
 
 def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(InlineQueryHandler(inline_query))
+    app.add_handler(CommandHandler("start", start))
+    # Monitora qualquer mensagem que pareça um link
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, search_music)
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(more_results, pattern="^more$")
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(select_track, pattern=r"^track_\d+$")
-    )
-
-    if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
-    else:
-        app.run_polling(drop_pending_updates=True)
-
+    print("Bot Curador Online...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

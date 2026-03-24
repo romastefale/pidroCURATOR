@@ -74,7 +74,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ Não foi possível ler o site (bloqueio severo ou link inválido).")
             return
 
-        # CORREÇÃO 1: Garantia absoluta de que será uma string, evitando crash no html.escape
         title = str(data.get('title') or 'Notícia')
         source = str(data.get('sitename') or 'Fonte')
         text = str(data.get('text') or '')[:4500] 
@@ -86,8 +85,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Título: {title}\nTexto: {text}"
         )
         
+        # CORREÇÃO AQUI: Atualizado para o modelo suportado pela versão atual da API (gemini-2.0-flash)
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt
         )
         
@@ -99,13 +99,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'<i>Via: <a href="{url}">{escape(source)}</a></i>'
         )
         
-        # CORREÇÃO 2: Removido o argumento obsoleto 'disable_web_page_preview'. 
-        # A API v21 do Telegram já processa o preview nativamente se a URL estiver no texto.
         await msg.edit_text(final_post, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logging.error(f"Erro Crítico: {e}")
-        # CORREÇÃO 3: Agora o erro real será exibido para você caso a IA caia, evitando "ficar cego"
         await msg.edit_text(f"❌ Falha: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

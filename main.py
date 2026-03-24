@@ -128,7 +128,7 @@ async def search_deezer(query, index=0):
 
 
 # =========================
-# INLINE MODE (ATUALIZADO)
+# INLINE MODE (FIX FINAL)
 # =========================
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,19 +156,17 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results.append(
                 InlineQueryResultArticle(
                     id=str(i),
-
                     title=f"{track['title']} — {track['artist']['name']}",
-
                     description=f"Album: {track['album']['title']}",
-
                     thumbnail_url=cover,
-
                     input_message_content=InputTextMessageContent(
                         message_text=(
+                            f"[\\u200b]({cover})\n"
                             f"♫ {user_name} is listening to...\n\n"
                             f"♬ *{title}* - _{album} — {artist}_"
                         ),
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
+                        disable_web_page_preview=False
                     )
                 )
             )

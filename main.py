@@ -9,9 +9,10 @@ import telegram.error
 from concurrent.futures import ThreadPoolExecutor
 from telegram import (
     Update,
-    InlineQueryResultPhoto,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    InlineQueryResultArticle,
+    InputTextMessageContent
 )
 
 from telegram.ext import (
@@ -59,10 +60,6 @@ def evict_cache():
             del cache[k]
 
 
-# =========================
-# RANKING INTELIGENTE
-# =========================
-
 def score_track(track, query):
     try:
         title = track["title"].lower()
@@ -73,13 +70,10 @@ def score_track(track, query):
 
         if q in f"{title} {artist}":
             score += 100
-
         if q in title:
             score += 60
-
         if q in artist:
             score += 40
-
         if title.startswith(q):
             score += 30
 
@@ -87,10 +81,6 @@ def score_track(track, query):
     except (KeyError, AttributeError):
         return 0
 
-
-# =========================
-# BUSCA NA API
-# =========================
 
 def _search_deezer_sync(query, index=0):
 
@@ -138,7 +128,7 @@ async def search_deezer(query, index=0):
 
 
 # =========================
-# INLINE MODE
+# INLINE MODE (ATUALIZADO)
 # =========================
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,27 +148,28 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, track in enumerate(tracks[:10]):
 
         try:
-
             title = escape_markdown(track["title"])
             artist = escape_markdown(track["artist"]["name"])
             album = escape_markdown(track["album"]["title"])
             cover = track["album"]["cover_big"]
 
             results.append(
-
-                InlineQueryResultPhoto(
+                InlineQueryResultArticle(
                     id=str(i),
-                    photo_url=cover,
-                    thumbnail_url=cover,
 
                     title=f"{track['title']} — {track['artist']['name']}",
-                    description="♪ Share this song",
 
-                    caption=(
-                        f"♫ {user_name} is listening to...\n\n"
-                        f"♬ *{title}* - _{album}_ — _{artist}_"
-                    ),
-                    parse_mode="Markdown"
+                    description=f"Album: {track['album']['title']}",
+
+                    thumbnail_url=cover,
+
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            f"♫ {user_name} is listening to...\n\n"
+                            f"♬ *{title}* - _{album} — {artist}_"
+                        ),
+                        parse_mode="Markdown"
+                    )
                 )
             )
 
@@ -189,7 +180,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# BUSCA NO CHAT
+# RESTANTE (INALTERADO)
 # =========================
 
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,10 +192,6 @@ async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_results(update, context)
 
-
-# =========================
-# ENVIAR RESULTADOS
-# =========================
 
 async def send_results(update, context):
 
@@ -249,10 +236,6 @@ async def send_results(update, context):
     )
 
 
-# =========================
-# MAIS RESULTADOS
-# =========================
-
 async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cb_query = update.callback_query
@@ -296,10 +279,6 @@ async def more_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# =========================
-# ESCOLHER MÚSICA
-# =========================
-
 async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cb_query = update.callback_query
@@ -326,10 +305,6 @@ async def select_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-
-# =========================
-# MAIN
-# =========================
 
 def main():
 

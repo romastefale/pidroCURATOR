@@ -19,7 +19,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Apenas erros críticos no log para manter a performance de I/O alta
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ================== DUMMY SERVER (ANTI-SLEEP) ==================
@@ -36,7 +35,6 @@ def run_dummy_server():
 
 # ================== EXTRAÇÃO ANTI-BLOQUEIO ==================
 def bulletproof_scrape(url):
-    """Finge ser um Chrome real para evitar bloqueios de firewall, depois extrai o texto."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -44,12 +42,10 @@ def bulletproof_scrape(url):
     }
     
     try:
-        # 1. Faz o download mascarado
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         html_content = response.text
         
-        # 2. Extrai de forma limpa
         extracted = trafilatura.extract(
             html_content, 
             output_format='json', 
@@ -64,28 +60,25 @@ def bulletproof_scrape(url):
 
 # ================== HANDLERS ==================
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Trava de segurança: apenas o ADMIN
     if update.effective_user.id != ADMIN_ID: return
     
     url = update.message.text.strip()
     if not url.startswith("http"): return
 
-    # Feedback de início imediato
     msg = await update.message.reply_text("⚡ Lendo...")
 
     try:
-        # Isola a requisição de rede em outra thread para não travar o bot
         data = await asyncio.to_thread(bulletproof_scrape, url)
         
         if not data or not data.get('text'):
             await msg.edit_text("❌ Não foi possível ler o site (bloqueio severo ou link inválido).")
             return
 
-        title = data.get('title', 'Notícia')
-        source = data.get('sitename') or 'Fonte'
-        text = data.get('text', '')[:4500] # Limite seguro de contexto
+        # CORREÇÃO 1: Garantia absoluta de que será uma string, evitando crash no html.escape
+        title = str(data.get('title') or 'Notícia')
+        source = str(data.get('sitename') or 'Fonte')
+        text = str(data.get('text') or '')[:4500] 
 
-        # Prompt blindado para evitar que a IA quebre o layout do Telegram
         prompt = (
             "Escreva um resumo direto e profissional desta notícia para um post. "
             "Regras estritas: Retorne APENAS o texto do resumo. Não use asteriscos, "
@@ -93,7 +86,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Título: {title}\nTexto: {text}"
         )
         
-        # Chamada assíncrona nativa da IA (Latência mínima)
         response = await gemini_client.aio.models.generate_content(
             model='gemini-1.5-flash',
             contents=prompt
@@ -101,19 +93,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         resumo_limpo = response.text.strip().replace('**', '').replace('*', '')
 
-        # Layout Inegociável (com blindagem de caracteres especiais via html.escape)
         final_post = (
             f"<b>{escape(title)}</b>\n\n"
             f"<blockquote><i>{escape(resumo_limpo)}</i></blockquote>\n\n"
             f'<i>Via: <a href="{url}">{escape(source)}</a></i>'
         )
         
-        # Disable_web_page_preview=False garante que o Instant View / Preview da URL apareça
-        await msg.edit_text(final_post, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+        # CORREÇÃO 2: Removido o argumento obsoleto 'disable_web_page_preview'. 
+        # A API v21 do Telegram já processa o preview nativamente se a URL estiver no texto.
+        await msg.edit_text(final_post, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logging.error(f"Erro Crítico: {e}")
-        await msg.edit_text("❌ Ocorreu um erro no processamento interno.")
+        # CORREÇÃO 3: Agora o erro real será exibido para você caso a IA caia, evitando "ficar cego"
+        await msg.edit_text(f"❌ Falha: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:

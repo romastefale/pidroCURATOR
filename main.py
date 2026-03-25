@@ -44,12 +44,18 @@ if not TOKEN:
 # Inicializa o bot
 bot = telebot.TeleBot(TOKEN, threaded=True)
 
-# Inicializa o cliente do Gemini (Nova biblioteca)
+# Inicializa o cliente do Gemini (Ajustado para API v1 estável)
 client = None
 if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={'api_version': 'v1'}
+        )
+    except Exception as e:
+        logging.error(f"Erro ao configurar cliente Gemini: {e}")
 else:
-    logging.warning("GEMINI_API_KEY não encontrada! O bot não conseguirá gerar resumos.")
+    logging.warning("GEMINI_API_KEY não encontrada!")
 
 # ================= INTEGRAÇÃO GEMINI =================
 def summarize_text(title, text):
@@ -61,27 +67,32 @@ def summarize_text(title, text):
         "Sua tarefa é ler o texto bruto de uma matéria e reescrevê-lo em um post atraente para o Telegram. "
         "REGRAS ABSOLUTAS: "
         "1. Use APENAS as informações explícitas no texto fornecido. "
-        "2. NUNCA invente, deduza ou adicione dados, nomes ou números externos (Zero Alucinação). "
-        "3. Se o texto estiver confuso, limite-se aos fatos claros. "
-        "4. Entregue o texto limpo, sem colocar o título (eu já o colocarei via código). "
-        "5. O seu resumo DEVE conter os seguintes tópicos (caso a informação exista no texto):\n"
-        "📌 Mais detalhes\n"
-        "📊 Impacto\n"
-        "🔎 Contexto"
+        "2. NUNCA adicione dados externos. "
+        "3. O seu resumo DEVE conter: 📌 Mais detalhes, 📊 Impacto e 🔎 Contexto."
     )
 
     user_prompt = f"TÍTULO ORIGINAL: {title}\n\nTEXTO BRUTO:\n{text}"
 
     try:
-        # Nova sintaxe de chamada do Gemini
+        # Chamada ajustada com Safety Settings para evitar erros de bloqueio
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=user_prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.2,
+                safety_settings=[
+                    types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+                ]
             ),
         )
+        
+        if not response.text:
+            return "❌ O Gemini não conseguiu processar esta notícia (conteúdo possivelmente bloqueado)."
+            
         return response.text.strip()
     except Exception as e:
         logging.error(f"Erro no Gemini: {e}")
@@ -94,67 +105,42 @@ def scrape(url):
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
     }
 
     try:
-        logging.info(f"Iniciando scraping (requests) para: {url}")
+        logging.info(f"Iniciando scraping para: {url}")
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
-        r.encoding = r.encoding or "utf-8"
         html_content = r.text
     except Exception as e:
-        logging.warning(f"Request padrão falhou, tentando cloudscraper: {e}")
+        logging.warning(f"Request falhou, tentando cloudscraper: {e}")
         try:
-            scraper = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "mobile": False}
-            )
+            scraper = cloudscraper.create_scraper()
             r = scraper.get(url, headers=headers, timeout=15)
-            r.raise_for_status()
-            r.encoding = r.encoding or "utf-8"
             html_content = r.text
         except Exception as e2:
             logging.error(f"Cloudscraper falhou: {e2}")
             return None
 
     try:
-        data = trafilatura.extract(
-            html_content, output_format="json", include_comments=False,
-            include_tables=False, favor_precision=True
-        )
+        data = trafilatura.extract(html_content, output_format="json")
         if data:
             parsed = json.loads(data)
             if parsed.get("text"):
                 return parsed
-    except Exception as e:
-        logging.warning(f"Trafilatura falhou: {e}")
+    except:
+        pass
 
+    # Fallback simples com BeautifulSoup
     try:
         soup = BeautifulSoup(html_content, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        article = soup.find("article")
-        if article:
-            text = article.get_text(separator=" ", strip=True)
-        else:
-            text = soup.get_text(separator=" ", strip=True)
-        
-        text = " ".join(text.split())
-        
+        text = " ".join([p.get_text() for p in soup.find_all("p")])
         if len(text) > 200:
-            title = soup.title.get_text(strip=True) if soup.title else "Notícia"
-            return {"title": title, "text": text, "sitename": ""}
-    except Exception as e:
-        logging.error(f"Fallback parsing falhou: {e}")
+            return {"title": soup.title.string if soup.title else "Notícia", "text": text}
+    except:
+        return None
 
-    logging.error(f"Falha total no scraping para a URL: {url}")
-    return None
-
-# ================= COMANDOS E HANDLERS =================
+# ================= HANDLERS =================
 @bot.message_handler(commands=['start'])
 def start_message(message):
     bot.reply_to(message, "🤖 Envie o link da notícia para eu gerar o resumo...")
@@ -162,7 +148,9 @@ def start_message(message):
 @bot.message_handler(func=lambda message: True)
 def handle_link(message):
     url = message.text.strip()
-    
+    if not url.startswith("http"):
+        return
+
     msg_status = bot.reply_to(message, "⏳ Lendo o link da notícia...")
     resultado = scrape(url)
     
@@ -170,17 +158,15 @@ def handle_link(message):
         titulo = resultado.get("title", "Sem Título")
         texto_bruto = resultado.get("text", "")
         
-        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="🧠 Resumindo conteúdo com Inteligência Artificial...")
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="🧠 Resumindo conteúdo...")
         
         texto_resumido = summarize_text(titulo, texto_bruto)
         
-        # Limpeza e Escapagem de HTML (Correção do Erro de formatação do Telegram)
         titulo_escapado = html.escape(titulo)
         texto_html = html.escape(texto_resumido)
         
-        # Corta o texto se for muito longo, ANTES de aplicar as tags blockquote
         if len(texto_html) > 3500:
-            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado pelo limite de tamanho]</i>"
+            texto_html = texto_html[:3500] + "..."
         
         resposta = (
             f'<a href="{url}">&#8203;</a>'
@@ -191,15 +177,13 @@ def handle_link(message):
         try:
             bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text=resposta, parse_mode="HTML")
         except Exception as e:
-            logging.error(f"Erro ao enviar a mensagem final: {e}")
-            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Ocorreu um erro ao formatar a mensagem visualmente para o Telegram.")
+            logging.error(f"Erro no envio: {e}")
+            bot.send_message(message.chat.id, "❌ Erro ao formatar mensagem.")
     else:
-        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto deste link. Pode haver um bloqueio de acesso.")
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Falha ao extrair texto do link.")
 
 # ================= INICIALIZAÇÃO =================
 if __name__ == "__main__":
-    # Inicia o servidor Dummy em uma thread separada para o Railway
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    logging.info("Iniciando o bot no Telegram...")
+    logging.info("Bot rodando...")
     bot.infinity_polling()

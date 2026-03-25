@@ -39,6 +39,16 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
 
+# ================= FUNÇÕES AUXILIARES / KEYBOARD =================
+def get_admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Publicar", callback_data="publicar_sim")],
+        [
+            InlineKeyboardButton("📝 Editar", callback_data="edit"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")
+        ]
+    ])
+
 # ================= SCRAPING =================
 def scrape(url: str) -> str:
     try:
@@ -123,7 +133,7 @@ Texto:
             client = genai.Client(api_key=GEMINI_API_KEY)
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash", # Ajustado para o modelo disponível
                 contents=prompt
             )
 
@@ -171,17 +181,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("📝 Envie um link de notícia.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso não autorizado.")
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_user.id != ADMIN_ID:
         return
 
-    texto_msg = update.message.text.strip()
+    # 1. Interceptação da Edição (Regra prioritária)
+    if update.message.text and context.user_data.get('is_editing'):
+        context.user_data['mensagem'] = update.message.text_html
+        context.user_data['is_editing'] = False
+        
+        await update.message.reply_text(
+            "✅ <b>Texto atualizado!</b> Confira abaixo:",
+            parse_mode=ParseMode.HTML
+        )
+        await update.message.reply_text(
+            context.user_data['mensagem'],
+            reply_markup=get_admin_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
 
-    # aguardando ID do canal
+    # 2. Aguardando ID do Canal para Publicação
     if context.user_data.get("aguardando_id"):
-        canal_id = texto_msg
-
+        canal_id = update.message.text.strip()
         try:
             await context.bot.send_message(
                 chat_id=canal_id,
@@ -189,63 +211,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=False
             )
-
             await update.message.reply_text("📢 Post enviado!")
         except Exception as e:
             logging.error(f"Erro ao enviar: {e}")
-            await update.message.reply_text("❌ Erro ao publicar. Verifique permissões.")
-
+            await update.message.reply_text("❌ Erro ao publicar. Verifique o ID e as permissões do bot.")
+        
         context.user_data.clear()
         return
 
-    # fluxo normal
-    if not texto_msg.startswith("http"):
-        await update.message.reply_text("Envie um link válido.")
-        return
+    # 3. Fluxo Normal de Processamento de Link
+    texto_msg = update.message.text.strip() if update.message.text else ""
+    if texto_msg.startswith("http"):
+        await update.message.reply_text("🔎 Processando...")
+        try:
+            html = scrape(texto_msg)
+            if not html:
+                await update.message.reply_text("Erro ao acessar o site.")
+                return
 
-    await update.message.reply_text("🔎 Processando...")
+            titulo, texto = extrair(html)
+            if not texto:
+                await update.message.reply_text("Erro ao extrair conteúdo.")
+                return
 
-    try:
-        html = scrape(texto_msg)
+            resumo = resumir(texto)
+            fonte = get_fonte_nome(texto_msg)
+            mensagem = formatar(titulo, resumo, fonte, texto_msg)
 
-        if not html:
-            await update.message.reply_text("Erro ao acessar o site.")
-            return
+            context.user_data["mensagem"] = mensagem
 
-        titulo, texto = extrair(html)
+            await update.message.reply_text(
+                mensagem,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False
+            )
 
-        if not texto:
-            await update.message.reply_text("Erro ao extrair conteúdo.")
-            return
-
-        resumo = resumir(texto)
-        fonte = get_fonte_nome(texto_msg)
-
-        mensagem = formatar(titulo, resumo, fonte, texto_msg)
-
-        context.user_data["mensagem"] = mensagem
-
-        await update.message.reply_text(
-            mensagem,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False
-        )
-
-        keyboard = [
-            [
-                InlineKeyboardButton("✔️ Sim", callback_data="publicar_sim"),
-                InlineKeyboardButton("❌ Não", callback_data="publicar_nao"),
-            ]
-        ]
-
-        await update.message.reply_text(
-            "📣 Publicar no canal?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    except Exception as e:
-        logging.exception("Erro geral")
-        await update.message.reply_text("Erro interno ao processar.")
+            await update.message.reply_text(
+                "📣 O que deseja fazer com esta notícia?",
+                reply_markup=get_admin_keyboard()
+            )
+        except Exception as e:
+            logging.exception("Erro geral")
+            await update.message.reply_text("Erro interno ao processar.")
+    else:
+        await update.message.reply_text("Envie um link válido ou use os botões.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -257,7 +266,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "publicar_sim":
         context.user_data["aguardando_id"] = True
-        await query.message.reply_text("🔢 Qual o ID?")
+        context.user_data['is_editing'] = False
+        await query.message.reply_text("🔢 Qual o ID do canal (ex: @meucanal ou -100...)?")
+    
+    elif query.data == "edit":
+        text_to_edit = context.user_data.get('mensagem', '')
+        if text_to_edit:
+            context.user_data['is_editing'] = True
+            await query.message.reply_text(
+                "👇 <b>Copie a mensagem abaixo, cole na sua caixa de texto, edite usando a própria formatação visual do Telegram e me envie de volta:</b>",
+                parse_mode=ParseMode.HTML
+            )
+            await query.message.reply_text(
+                text_to_edit,
+                parse_mode=ParseMode.HTML
+            )
+    
     elif query.data == "publicar_nao":
         context.user_data.clear()
         await query.message.reply_text("❌ Cancelado.")
@@ -268,7 +292,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # O MessageHandler(filters.ALL) agora gerencia o fluxo de links, IDs e Edições via message_router
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
     logging.info("Bot iniciado...")
     app.run_polling()

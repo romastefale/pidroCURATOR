@@ -9,6 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CopyTextButton
 from openai import OpenAI
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
@@ -18,8 +19,6 @@ logging.basicConfig(
 )
 
 # ================= SERVIDOR DUMMY (PARA O RAILWAY) =================
-# O Railway exige que os serviços respondam em uma porta (PORT) por padrão.
-# Este servidor roda em segundo plano apenas para evitar que o Railway derrube o deploy.
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -42,10 +41,7 @@ if not TOKEN:
     logging.error("A variável de ambiente TELEGRAM_TOKEN não foi encontrada!")
     exit(1)
 
-# Inicializa o bot
 bot = telebot.TeleBot(TOKEN, threaded=True)
-
-# Inicializa o cliente da OpenAI
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 if not client:
@@ -173,11 +169,9 @@ def handle_link(message):
         
         texto_resumido = summarize_text(titulo, texto_bruto)
         
-        # Limpeza e Escapagem de HTML (Correção do Erro de formatação do Telegram)
         titulo_escapado = html.escape(titulo)
         texto_html = html.escape(texto_resumido)
         
-        # Corta o texto se for muito longo, ANTES de aplicar as tags blockquote
         if len(texto_html) > 3500:
             texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado pelo limite de tamanho]</i>"
         
@@ -188,7 +182,22 @@ def handle_link(message):
         )
         
         try:
-            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text=resposta, parse_mode="HTML")
+            # -------- CRIAÇÃO DO BOTÃO DE CÓPIA --------
+            markup = InlineKeyboardMarkup()
+            btn_copiar = InlineKeyboardButton(
+                "📝 Copiar", 
+                copy_text=CopyTextButton(text=resposta)
+            )
+            markup.add(btn_copiar)
+            # -------------------------------------------
+
+            bot.edit_message_text(
+                chat_id=message.chat.id, 
+                message_id=msg_status.message_id, 
+                text=resposta, 
+                parse_mode="HTML",
+                reply_markup=markup
+            )
         except Exception as e:
             logging.error(f"Erro ao enviar a mensagem final: {e}")
             bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Ocorreu um erro ao formatar a mensagem visualmente para o Telegram.")
@@ -197,8 +206,6 @@ def handle_link(message):
 
 # ================= INICIALIZAÇÃO =================
 if __name__ == "__main__":
-    # Inicia o servidor Dummy em uma thread separada para o Railway
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
     logging.info("Iniciando o bot no Telegram...")
     bot.infinity_polling()

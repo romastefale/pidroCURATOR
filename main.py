@@ -106,8 +106,8 @@ def resumir(texto: str) -> str:
 Resuma a seguinte notícia em português.
 
 Regras:
-- Um único parágrafo
-- 4 a 6 frases
+- Um ou dois parágrafos
+- 2 a 4 frases
 - Linguagem jornalística
 - Comece direto pelo fato principal
 

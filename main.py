@@ -45,19 +45,14 @@ def scrape(url: str) -> str:
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             return response.text
-
-        logging.warning(f"requests falhou: {response.status_code}")
     except Exception as e:
         logging.warning(f"requests erro: {e}")
 
-    # fallback cloudscraper
     try:
         scraper = cloudscraper.create_scraper()
         response = scraper.get(url, headers=HEADERS, timeout=10)
-
         if response.status_code == 200:
             return response.text
-
     except Exception as e:
         logging.error(f"cloudscraper erro: {e}")
 
@@ -65,20 +60,17 @@ def scrape(url: str) -> str:
 
 
 # ================= EXTRAÇÃO =================
-def extrair(html: str, url: str):
+def extrair(html: str):
     titulo = "Sem título"
     texto = ""
 
     try:
         downloaded = trafilatura.extract(html, include_comments=False)
-
         if downloaded and len(downloaded) > 200:
             texto = downloaded
-
     except Exception as e:
         logging.warning(f"trafilatura erro: {e}")
 
-    # fallback BeautifulSoup
     if not texto:
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -86,7 +78,6 @@ def extrair(html: str, url: str):
             for tag in soup(["script", "style"]):
                 tag.decompose()
 
-            # título
             if soup.title and soup.title.string:
                 titulo = soup.title.string.strip()
 
@@ -96,7 +87,6 @@ def extrair(html: str, url: str):
         except Exception as e:
             logging.error(f"BeautifulSoup erro: {e}")
 
-    # tenta título via trafilatura metadata
     try:
         meta = trafilatura.extract_metadata(html)
         if meta and meta.title:
@@ -140,7 +130,6 @@ Texto:
 
             if response and response.text:
                 resumo = response.text.strip()
-
                 if len(resumo) > 50:
                     return resumo
 
@@ -148,7 +137,6 @@ Texto:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
             time.sleep(2)
 
-    # fallback
     try:
         frases = re.split(r'(?<=[.!?]) +', texto)
         resumo = " ".join(frases[:5]).strip()
@@ -161,20 +149,24 @@ Texto:
 
 
 # ================= UTIL =================
-def get_fonte(url: str) -> str:
+def get_fonte_nome(url: str) -> str:
     try:
         dominio = urlparse(url).netloc.replace("www.", "")
-        return dominio
+        nome = dominio.split(".")[0]
+        return nome.capitalize()
     except:
-        return "Fonte desconhecida"
+        return "Fonte"
 
 
 def formatar(titulo, resumo, fonte, link):
+    # link invisível para forçar instant view
+    invisible_link = f'<a href="{link}">&#8203;</a>'
+
     return (
         f"<b>📰 {titulo}</b>\n\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n\n"
-        f"Fonte: <i>{fonte}</i>\n\n"
-        f'<a href="{link}">🔗 Leia mais</a>'
+        f"Fonte: <i>{fonte}</i>\n"
+        f"{invisible_link}"
     )
 
 
@@ -207,21 +199,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Erro ao acessar o site.")
             return
 
-        titulo, texto = extrair(html, url)
+        titulo, texto = extrair(html)
 
         if not texto:
             await update.message.reply_text("Erro ao extrair conteúdo.")
             return
 
         resumo = resumir(texto)
-        fonte = get_fonte(url)
+        fonte = get_fonte_nome(url)
 
         mensagem = formatar(titulo, resumo, fonte, url)
 
         await update.message.reply_text(
             mensagem,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False
+            disable_web_page_preview=False  # necessário para instant view
         )
 
     except Exception as e:

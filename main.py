@@ -1,10 +1,22 @@
+import telebot
+import json
+import logging
+import requests
+import trafilatura
+from bs4 import BeautifulSoup
+
+# ================= CONFIGURAÇÃO DO BOT =================
+# Insira o token gerado pelo BotFather no Telegram
+TOKEN = "COLOQUE_SEU_TOKEN_AQUI"
+bot = telebot.TeleBot(TOKEN)
+
+# ================= COMANDOS DO BOT =================
+@bot.message_handler(commands=['start'])
+def start_message(message):
+    bot.reply_to(message, "🤖 Envie link…")
+
 # ================= SCRAPER =================
 def scrape(url):
-    import json
-    import logging
-    import requests
-    import trafilatura
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -58,8 +70,6 @@ def scrape(url):
 
     # -------- FALLBACK MANUAL --------
     try:
-        from bs4 import BeautifulSoup
-
         soup = BeautifulSoup(html, "html.parser")
 
         for tag in soup(["script", "style", "noscript"]):
@@ -86,3 +96,8 @@ def scrape(url):
 
     logging.error("Falha total no scraping")
     return None
+
+# ================= INICIALIZAÇÃO =================
+if __name__ == "__main__":
+    print("Bot rodando...")
+    bot.infinity_polling()

@@ -1,5 +1,10 @@
 # ================= SCRAPER =================
 def scrape(url):
+    import json
+    import logging
+    import requests
+    import trafilatura
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -13,6 +18,7 @@ def scrape(url):
         # -------- PRIMEIRA TENTATIVA (requests) --------
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
+        r.encoding = r.encoding or "utf-8"
         html = r.text
 
     except Exception as e:
@@ -25,6 +31,7 @@ def scrape(url):
             )
             r = scraper.get(url, headers=headers, timeout=15)
             r.raise_for_status()
+            r.encoding = r.encoding or "utf-8"
             html = r.text
 
         except Exception as e2:
@@ -55,23 +62,19 @@ def scrape(url):
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # Remove scripts e styles
         for tag in soup(["script", "style", "noscript"]):
-            tag.extract()
+            tag.decompose()
 
-        # Tenta pegar <article>
         article = soup.find("article")
         if article:
             text = article.get_text(separator=" ", strip=True)
         else:
-            # fallback geral
             text = soup.get_text(separator=" ", strip=True)
 
-        # Limpeza básica
         text = " ".join(text.split())
 
         if len(text) > 200:
-            title = soup.title.string.strip() if soup.title else "Notícia"
+            title = soup.title.string.strip() if soup.title and soup.title.string else "Notícia"
             return {
                 "title": title,
                 "text": text,

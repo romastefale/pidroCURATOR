@@ -9,7 +9,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CopyTextButton
+from telebot.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    InlineQueryResultArticle, 
+    InputTextMessageContent
+)
 from openai import OpenAI
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
@@ -46,6 +51,11 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 if not client:
     logging.warning("OPENAI_API_KEY não encontrada! O bot não conseguirá gerar resumos.")
+
+# ================= CACHE DE USUÁRIOS =================
+# Armazena temporariamente a última notícia gerada por cada usuário
+# para que o bot saiba o que compartilhar quando o botão for clicado.
+USER_CACHE = {}
 
 # ================= INTEGRAÇÃO OPENAI =================
 def summarize_text(title, text):
@@ -97,17 +107,13 @@ def scrape(url):
     }
 
     try:
-        logging.info(f"Iniciando scraping (requests) para: {url}")
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         r.encoding = r.encoding or "utf-8"
         html_content = r.text
-    except Exception as e:
-        logging.warning(f"Request padrão falhou, tentando cloudscraper: {e}")
+    except Exception:
         try:
-            scraper = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "mobile": False}
-            )
+            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
             r = scraper.get(url, headers=headers, timeout=15)
             r.raise_for_status()
             r.encoding = r.encoding or "utf-8"
@@ -117,16 +123,13 @@ def scrape(url):
             return None
 
     try:
-        data = trafilatura.extract(
-            html_content, output_format="json", include_comments=False,
-            include_tables=False, favor_precision=True
-        )
+        data = trafilatura.extract(html_content, output_format="json", include_comments=False, include_tables=False, favor_precision=True)
         if data:
             parsed = json.loads(data)
             if parsed.get("text"):
                 return parsed
-    except Exception as e:
-        logging.warning(f"Trafilatura falhou: {e}")
+    except Exception:
+        pass
 
     try:
         soup = BeautifulSoup(html_content, "html.parser")
@@ -146,10 +149,36 @@ def scrape(url):
     except Exception as e:
         logging.error(f"Fallback parsing falhou: {e}")
 
-    logging.error(f"Falha total no scraping para a URL: {url}")
     return None
 
 # ================= COMANDOS E HANDLERS =================
+
+# 1. Handler do Compartilhamento (Inline Mode)
+@bot.inline_handler(func=lambda query: query.query == "share")
+def handle_inline_share(inline_query):
+    user_id = inline_query.from_user.id
+    resposta_formatada = USER_CACHE.get(user_id)
+    
+    if not resposta_formatada:
+        return
+        
+    # Prepara o conteúdo exato com a formatação HTML
+    conteudo = InputTextMessageContent(
+        message_text=resposta_formatada,
+        parse_mode="HTML"
+    )
+    
+    # Cria o "card" que você vai clicar para confirmar o envio
+    artigo = InlineQueryResultArticle(
+        id="share_news",
+        title="📰 Publicar Notícia",
+        description="Toque aqui para enviar a notícia formatada para este chat.",
+        input_message_content=conteudo
+    )
+    
+    bot.answer_inline_query(inline_query.id, [artigo], cache_time=1)
+
+# 2. Handlers Normais de Mensagem
 @bot.message_handler(commands=['start'])
 def start_message(message):
     bot.reply_to(message, "🤖 Envie o link da notícia para eu gerar o resumo...")
@@ -181,15 +210,19 @@ def handle_link(message):
             f"<blockquote>{texto_html}</blockquote>"
         )
         
+        # Salva o resultado no cache do usuário para o Inline Query poder acessar depois
+        USER_CACHE[message.from_user.id] = resposta
+        
         try:
-            # -------- CRIAÇÃO DO BOTÃO DE CÓPIA --------
+            # -------- CRIAÇÃO DO BOTÃO DE COMPARTILHAMENTO --------
             markup = InlineKeyboardMarkup()
-            btn_copiar = InlineKeyboardButton(
-                "📝 Copiar", 
-                copy_text=CopyTextButton(text=resposta)
+            # O parâmetro switch_inline_query abre a seleção de chats do Telegram
+            btn_compartilhar = InlineKeyboardButton(
+                "↗️ Compartilhar", 
+                switch_inline_query="share"
             )
-            markup.add(btn_copiar)
-            # -------------------------------------------
+            markup.add(btn_compartilhar)
+            # ------------------------------------------------------
 
             bot.edit_message_text(
                 chat_id=message.chat.id, 

@@ -9,7 +9,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
 logging.basicConfig(
@@ -43,15 +44,16 @@ if not TOKEN:
 # Inicializa o bot
 bot = telebot.TeleBot(TOKEN, threaded=True)
 
-# Inicializa o cliente do Gemini
+# Inicializa o cliente do Gemini (Nova biblioteca)
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     logging.warning("GEMINI_API_KEY não encontrada! O bot não conseguirá gerar resumos.")
 
 # ================= INTEGRAÇÃO GEMINI =================
 def summarize_text(title, text):
-    if not GEMINI_API_KEY:
+    if not client:
         return "⚠️ Erro interno: GEMINI_API_KEY não está configurada."
 
     system_prompt = (
@@ -71,15 +73,14 @@ def summarize_text(title, text):
     user_prompt = f"TÍTULO ORIGINAL: {title}\n\nTEXTO BRUTO:\n{text}"
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=system_prompt,
-        )
-        response = model.generate_content(
-            user_prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.2
-            )
+        # Nova sintaxe de chamada do Gemini
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.2,
+            ),
         )
         return response.text.strip()
     except Exception as e:

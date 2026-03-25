@@ -9,8 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from openai import OpenAI
+import google.generativeai as genai
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
 logging.basicConfig(
@@ -35,23 +34,25 @@ def run_dummy_server():
 
 # ================= CONFIGURAÇÕES E CHAVES =================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-CHANNEL_ID = os.environ.get("CHANNEL_ID") # <-- ID do canal para onde a notícia vai
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not TOKEN:
     logging.error("A variável de ambiente TELEGRAM_TOKEN não foi encontrada!")
     exit(1)
 
+# Inicializa o bot
 bot = telebot.TeleBot(TOKEN, threaded=True)
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# Dicionário para armazenar as notícias geradas temporariamente (Rascunhos)
-DRAFTS = {}
+# Inicializa o cliente do Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logging.warning("GEMINI_API_KEY não encontrada! O bot não conseguirá gerar resumos.")
 
-# ================= INTEGRAÇÃO OPENAI =================
+# ================= INTEGRAÇÃO GEMINI =================
 def summarize_text(title, text):
-    if not client:
-        return "⚠️ Erro interno: OPENAI_API_KEY não está configurada."
+    if not GEMINI_API_KEY:
+        return "⚠️ Erro interno: GEMINI_API_KEY não está configurada."
 
     system_prompt = (
         "Você é um editor-chefe de jornalismo rigoroso e imparcial. "
@@ -70,17 +71,19 @@ def summarize_text(title, text):
     user_prompt = f"TÍTULO ORIGINAL: {title}\n\nTEXTO BRUTO:\n{text}"
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=system_prompt,
         )
-        return response.choices[0].message.content.strip()
+        response = model.generate_content(
+            user_prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.2
+            )
+        )
+        return response.text.strip()
     except Exception as e:
-        logging.error(f"Erro na OpenAI: {e}")
+        logging.error(f"Erro no Gemini: {e}")
         return "❌ Ocorreu um erro ao processar o resumo com a Inteligência Artificial."
 
 # ================= SCRAPER =================
@@ -98,11 +101,13 @@ def scrape(url):
     }
 
     try:
+        logging.info(f"Iniciando scraping (requests) para: {url}")
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         r.encoding = r.encoding or "utf-8"
         html_content = r.text
     except Exception as e:
+        logging.warning(f"Request padrão falhou, tentando cloudscraper: {e}")
         try:
             scraper = cloudscraper.create_scraper(
                 browser={"browser": "chrome", "platform": "windows", "mobile": False}
@@ -112,6 +117,7 @@ def scrape(url):
             r.encoding = r.encoding or "utf-8"
             html_content = r.text
         except Exception as e2:
+            logging.error(f"Cloudscraper falhou: {e2}")
             return None
 
     try:
@@ -123,8 +129,8 @@ def scrape(url):
             parsed = json.loads(data)
             if parsed.get("text"):
                 return parsed
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Trafilatura falhou: {e}")
 
     try:
         soup = BeautifulSoup(html_content, "html.parser")
@@ -141,9 +147,10 @@ def scrape(url):
         if len(text) > 200:
             title = soup.title.get_text(strip=True) if soup.title else "Notícia"
             return {"title": title, "text": text, "sitename": ""}
-    except Exception:
-        return None
+    except Exception as e:
+        logging.error(f"Fallback parsing falhou: {e}")
 
+    logging.error(f"Falha total no scraping para a URL: {url}")
     return None
 
 # ================= COMANDOS E HANDLERS =================
@@ -166,11 +173,13 @@ def handle_link(message):
         
         texto_resumido = summarize_text(titulo, texto_bruto)
         
+        # Limpeza e Escapagem de HTML (Correção do Erro de formatação do Telegram)
         titulo_escapado = html.escape(titulo)
         texto_html = html.escape(texto_resumido)
         
+        # Corta o texto se for muito longo, ANTES de aplicar as tags blockquote
         if len(texto_html) > 3500:
-            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado]</i>"
+            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado pelo limite de tamanho]</i>"
         
         resposta = (
             f'<a href="{url}">&#8203;</a>'
@@ -178,63 +187,18 @@ def handle_link(message):
             f"<blockquote>{texto_html}</blockquote>"
         )
         
-        # Salva o rascunho formatado vinculado ao ID do usuário
-        user_id = message.from_user.id
-        DRAFTS[user_id] = resposta
-        
         try:
-            # Cria o botão de publicar
-            markup = InlineKeyboardMarkup()
-            btn_publicar = InlineKeyboardButton("✅ Publicar no Canal", callback_data="publish")
-            markup.add(btn_publicar)
-
-            bot.edit_message_text(
-                chat_id=message.chat.id, 
-                message_id=msg_status.message_id, 
-                text=resposta, 
-                parse_mode="HTML",
-                reply_markup=markup
-            )
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text=resposta, parse_mode="HTML")
         except Exception as e:
-            logging.error(f"Erro ao enviar: {e}")
+            logging.error(f"Erro ao enviar a mensagem final: {e}")
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Ocorreu um erro ao formatar a mensagem visualmente para o Telegram.")
     else:
-        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto.")
-
-# ================= CALLBACK DO BOTÃO DE PUBLICAR =================
-@bot.callback_query_handler(func=lambda call: call.data == "publish")
-def callback_publish(call):
-    user_id = call.from_user.id
-    
-    # Verifica se a variável de ambiente CHANNEL_ID foi configurada
-    if not CHANNEL_ID:
-        bot.answer_callback_query(call.id, "❌ Erro: Variável CHANNEL_ID não configurada no servidor.", show_alert=True)
-        return
-        
-    # Verifica se o bot tem a mensagem salva na memória
-    if user_id in DRAFTS:
-        try:
-            # Envia a mensagem salva e formatada para o canal
-            bot.send_message(chat_id=CHANNEL_ID, text=DRAFTS[user_id], parse_mode="HTML")
-            
-            # Avisa na tela que deu certo
-            bot.answer_callback_query(call.id, "✅ Postagem publicada com sucesso!")
-            
-            # Remove o botão da mensagem original e adiciona um aviso de "Publicado"
-            bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-            novo_texto = call.message.html_text + "\n\n<i>✅ Publicado no canal.</i>"
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=novo_texto, parse_mode="HTML")
-            
-            # Limpa o rascunho da memória
-            del DRAFTS[user_id]
-            
-        except Exception as e:
-            logging.error(f"Erro ao postar no canal: {e}")
-            bot.answer_callback_query(call.id, "❌ Erro ao enviar. Verifique se o bot é administrador do canal.", show_alert=True)
-    else:
-        bot.answer_callback_query(call.id, "⚠️ Rascunho não encontrado ou já publicado.", show_alert=True)
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto deste link. Pode haver um bloqueio de acesso.")
 
 # ================= INICIALIZAÇÃO =================
 if __name__ == "__main__":
+    # Inicia o servidor Dummy em uma thread separada para o Railway
     threading.Thread(target=run_dummy_server, daemon=True).start()
+    
     logging.info("Iniciando o bot no Telegram...")
     bot.infinity_polling()

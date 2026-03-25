@@ -3,4 +3,4 @@ requests
 cloudscraper
 trafilatura
 beautifulsoup4
-openai
+google-generativeai

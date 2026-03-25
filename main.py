@@ -9,12 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
-from telebot.types import (
-    InlineKeyboardMarkup, 
-    InlineKeyboardButton, 
-    InlineQueryResultArticle, 
-    InputTextMessageContent
-)
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
@@ -41,6 +36,7 @@ def run_dummy_server():
 # ================= CONFIGURAÇÕES E CHAVES =================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+CHANNEL_ID = os.environ.get("CHANNEL_ID") # <-- ID do canal para onde a notícia vai
 
 if not TOKEN:
     logging.error("A variável de ambiente TELEGRAM_TOKEN não foi encontrada!")
@@ -49,13 +45,8 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN, threaded=True)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-if not client:
-    logging.warning("OPENAI_API_KEY não encontrada! O bot não conseguirá gerar resumos.")
-
-# ================= CACHE DE USUÁRIOS =================
-# Armazena temporariamente a última notícia gerada por cada usuário
-# para que o bot saiba o que compartilhar quando o botão for clicado.
-USER_CACHE = {}
+# Dicionário para armazenar as notícias geradas temporariamente (Rascunhos)
+DRAFTS = {}
 
 # ================= INTEGRAÇÃO OPENAI =================
 def summarize_text(title, text):
@@ -111,19 +102,23 @@ def scrape(url):
         r.raise_for_status()
         r.encoding = r.encoding or "utf-8"
         html_content = r.text
-    except Exception:
+    except Exception as e:
         try:
-            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+            scraper = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
             r = scraper.get(url, headers=headers, timeout=15)
             r.raise_for_status()
             r.encoding = r.encoding or "utf-8"
             html_content = r.text
         except Exception as e2:
-            logging.error(f"Cloudscraper falhou: {e2}")
             return None
 
     try:
-        data = trafilatura.extract(html_content, output_format="json", include_comments=False, include_tables=False, favor_precision=True)
+        data = trafilatura.extract(
+            html_content, output_format="json", include_comments=False,
+            include_tables=False, favor_precision=True
+        )
         if data:
             parsed = json.loads(data)
             if parsed.get("text"):
@@ -146,39 +141,12 @@ def scrape(url):
         if len(text) > 200:
             title = soup.title.get_text(strip=True) if soup.title else "Notícia"
             return {"title": title, "text": text, "sitename": ""}
-    except Exception as e:
-        logging.error(f"Fallback parsing falhou: {e}")
+    except Exception:
+        return None
 
     return None
 
 # ================= COMANDOS E HANDLERS =================
-
-# 1. Handler do Compartilhamento (Inline Mode)
-@bot.inline_handler(func=lambda query: query.query == "share")
-def handle_inline_share(inline_query):
-    user_id = inline_query.from_user.id
-    resposta_formatada = USER_CACHE.get(user_id)
-    
-    if not resposta_formatada:
-        return
-        
-    # Prepara o conteúdo exato com a formatação HTML
-    conteudo = InputTextMessageContent(
-        message_text=resposta_formatada,
-        parse_mode="HTML"
-    )
-    
-    # Cria o "card" que você vai clicar para confirmar o envio
-    artigo = InlineQueryResultArticle(
-        id="share_news",
-        title="📰 Publicar Notícia",
-        description="Toque aqui para enviar a notícia formatada para este chat.",
-        input_message_content=conteudo
-    )
-    
-    bot.answer_inline_query(inline_query.id, [artigo], cache_time=1)
-
-# 2. Handlers Normais de Mensagem
 @bot.message_handler(commands=['start'])
 def start_message(message):
     bot.reply_to(message, "🤖 Envie o link da notícia para eu gerar o resumo...")
@@ -202,7 +170,7 @@ def handle_link(message):
         texto_html = html.escape(texto_resumido)
         
         if len(texto_html) > 3500:
-            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado pelo limite de tamanho]</i>"
+            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado]</i>"
         
         resposta = (
             f'<a href="{url}">&#8203;</a>'
@@ -210,19 +178,15 @@ def handle_link(message):
             f"<blockquote>{texto_html}</blockquote>"
         )
         
-        # Salva o resultado no cache do usuário para o Inline Query poder acessar depois
-        USER_CACHE[message.from_user.id] = resposta
+        # Salva o rascunho formatado vinculado ao ID do usuário
+        user_id = message.from_user.id
+        DRAFTS[user_id] = resposta
         
         try:
-            # -------- CRIAÇÃO DO BOTÃO DE COMPARTILHAMENTO --------
+            # Cria o botão de publicar
             markup = InlineKeyboardMarkup()
-            # O parâmetro switch_inline_query abre a seleção de chats do Telegram
-            btn_compartilhar = InlineKeyboardButton(
-                "↗️ Compartilhar", 
-                switch_inline_query="share"
-            )
-            markup.add(btn_compartilhar)
-            # ------------------------------------------------------
+            btn_publicar = InlineKeyboardButton("✅ Publicar no Canal", callback_data="publish")
+            markup.add(btn_publicar)
 
             bot.edit_message_text(
                 chat_id=message.chat.id, 
@@ -232,10 +196,42 @@ def handle_link(message):
                 reply_markup=markup
             )
         except Exception as e:
-            logging.error(f"Erro ao enviar a mensagem final: {e}")
-            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Ocorreu um erro ao formatar a mensagem visualmente para o Telegram.")
+            logging.error(f"Erro ao enviar: {e}")
     else:
-        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto deste link. Pode haver um bloqueio de acesso.")
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto.")
+
+# ================= CALLBACK DO BOTÃO DE PUBLICAR =================
+@bot.callback_query_handler(func=lambda call: call.data == "publish")
+def callback_publish(call):
+    user_id = call.from_user.id
+    
+    # Verifica se a variável de ambiente CHANNEL_ID foi configurada
+    if not CHANNEL_ID:
+        bot.answer_callback_query(call.id, "❌ Erro: Variável CHANNEL_ID não configurada no servidor.", show_alert=True)
+        return
+        
+    # Verifica se o bot tem a mensagem salva na memória
+    if user_id in DRAFTS:
+        try:
+            # Envia a mensagem salva e formatada para o canal
+            bot.send_message(chat_id=CHANNEL_ID, text=DRAFTS[user_id], parse_mode="HTML")
+            
+            # Avisa na tela que deu certo
+            bot.answer_callback_query(call.id, "✅ Postagem publicada com sucesso!")
+            
+            # Remove o botão da mensagem original e adiciona um aviso de "Publicado"
+            bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+            novo_texto = call.message.html_text + "\n\n<i>✅ Publicado no canal.</i>"
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=novo_texto, parse_mode="HTML")
+            
+            # Limpa o rascunho da memória
+            del DRAFTS[user_id]
+            
+        except Exception as e:
+            logging.error(f"Erro ao postar no canal: {e}")
+            bot.answer_callback_query(call.id, "❌ Erro ao enviar. Verifique se o bot é administrador do canal.", show_alert=True)
+    else:
+        bot.answer_callback_query(call.id, "⚠️ Rascunho não encontrado ou já publicado.", show_alert=True)
 
 # ================= INICIALIZAÇÃO =================
 if __name__ == "__main__":

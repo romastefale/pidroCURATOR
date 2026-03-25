@@ -168,7 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Acesso não autorizado.")
         return
 
-    await update.message.reply_text("📝Envie um link de notícia.")
+    await update.message.reply_text("📝 Envie um link de notícia.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:

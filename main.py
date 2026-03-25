@@ -159,7 +159,7 @@ def formatar(titulo, resumo, fonte, link):
         f"<b>📰 {titulo}</b>\n\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n\n"
         f"Fonte: <i>{fonte}</i>\n\n"
-        f'<a href="{link}">🔗 Leia mais</a>'
+        f'<a href="{link}">&#8203;</a>'
     )
 
 # ================= TELEGRAM =================

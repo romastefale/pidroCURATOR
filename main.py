@@ -156,9 +156,9 @@ def get_fonte_nome(url: str) -> str:
 
 def formatar(titulo, resumo, fonte, link):
     return (
-        f"<b>📰 {titulo}</b>\n\n"
-        f"<blockquote><i>{resumo}</i></blockquote>\n\n"
-        f"Fonte: <i>{fonte}</i>\n\n"
+        f"<b>{titulo}</b>\n"
+        f"<blockquote><i>{resumo}</i></blockquote>\n"
+        f"<i>Fonte: {fonte}</i>\n\n"
         f'<a href="{link}">&#8203;</a>'
     )
 
@@ -168,7 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Acesso não autorizado.")
         return
 
-    await update.message.reply_text("Envie um link de notícia.")
+    await update.message.reply_text("📝Envie um link de notícia.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:

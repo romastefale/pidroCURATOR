@@ -5,15 +5,34 @@ import requests
 import trafilatura
 import cloudscraper
 import html
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 import telebot
-from openai import OpenAI  # <--- IMPORT DA OPENAI ADICIONADO
+from openai import OpenAI
 
 # ================= CONFIGURAÇÃO DE LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+# ================= SERVIDOR DUMMY (PARA O RAILWAY) =================
+# O Railway exige que os serviços respondam em uma porta (PORT) por padrão.
+# Este servidor roda em segundo plano apenas para evitar que o Railway derrube o deploy.
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write("Bot Ativo".encode("utf-8"))
+    def log_message(self, format, *args):
+        pass
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    logging.info(f"Servidor Dummy rodando na porta {port}")
+    server.serve_forever()
 
 # ================= CONFIGURAÇÕES E CHAVES =================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -23,7 +42,7 @@ if not TOKEN:
     logging.error("A variável de ambiente TELEGRAM_TOKEN não foi encontrada!")
     exit(1)
 
-# Inicializa o bot do Telegram
+# Inicializa o bot
 bot = telebot.TeleBot(TOKEN, threaded=True)
 
 # Inicializa o cliente da OpenAI
@@ -34,9 +53,8 @@ if not client:
 
 # ================= INTEGRAÇÃO OPENAI =================
 def summarize_text(title, text):
-    """Envia o texto bruto para a OpenAI gerar o post blindado contra alucinações."""
     if not client:
-        return "⚠️ Erro interno: OPENAI_API_KEY não está configurada no servidor."
+        return "⚠️ Erro interno: OPENAI_API_KEY não está configurada."
 
     system_prompt = (
         "Você é um editor-chefe de jornalismo rigoroso e imparcial. "
@@ -61,14 +79,14 @@ def summarize_text(title, text):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2 # Temperatura baixa para garantir zero alucinação
+            temperature=0.2
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         logging.error(f"Erro na OpenAI: {e}")
         return "❌ Ocorreu um erro ao processar o resumo com a Inteligência Artificial."
 
-# ================= SCRAPER (MANTIDO INTACTO) =================
+# ================= SCRAPER =================
 def scrape(url):
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -144,26 +162,43 @@ def start_message(message):
 def handle_link(message):
     url = message.text.strip()
     
-    # Etapa 1: Feedback inicial
     msg_status = bot.reply_to(message, "⏳ Lendo o link da notícia...")
-    
-    # Etapa 2: Extrai o texto do site
     resultado = scrape(url)
     
     if resultado and resultado.get("text"):
         titulo = resultado.get("title", "Sem Título")
         texto_bruto = resultado.get("text", "")
         
-        # Atualiza o status para o usuário
         bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="🧠 Resumindo conteúdo com Inteligência Artificial...")
         
-        # Etapa 3: Pede para a OpenAI formatar
         texto_resumido = summarize_text(titulo, texto_bruto)
         
-        # Etapa 4: Montagem do HTML com o truque do Link Invisível e Blockquote
+        # Limpeza e Escapagem de HTML (Correção do Erro de formatação do Telegram)
         titulo_escapado = html.escape(titulo)
-        # Substitui quebras de linha normais do GPT para garantir a indentação HTML
-        texto_html = html.escape(texto_resumido).replace("\n", "<br>") 
+        texto_html = html.escape(texto_resumido)
+        
+        # Corta o texto se for muito longo, ANTES de aplicar as tags blockquote
+        if len(texto_html) > 3500:
+            texto_html = texto_html[:3500] + "...\n\n<i>[Resumo truncado pelo limite de tamanho]</i>"
         
         resposta = (
-            f'<a href="{
+            f'<a href="{url}">&#8203;</a>'
+            f"<b>{titulo_escapado}</b>\n\n"
+            f"<blockquote>{texto_html}</blockquote>"
+        )
+        
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text=resposta, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Erro ao enviar a mensagem final: {e}")
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Ocorreu um erro ao formatar a mensagem visualmente para o Telegram.")
+    else:
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Não foi possível extrair o texto deste link. Pode haver um bloqueio de acesso.")
+
+# ================= INICIALIZAÇÃO =================
+if __name__ == "__main__":
+    # Inicia o servidor Dummy em uma thread separada para o Railway
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    
+    logging.info("Iniciando o bot no Telegram...")
+    bot.infinity_polling()

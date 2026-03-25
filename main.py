@@ -74,7 +74,7 @@ def scrape(url):
 # ================= FALLBACK =================
 def fallback(text):
     try:
-        return ".".join(text.split(".")[:3])
+        return ".".join(text.replace("\n", " ").split(".")[:4])
     except:
         return text[:300]
 
@@ -87,13 +87,38 @@ async def resumo_ai(title, text):
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-        prompt = f"Resuma em 3 frases, jornalístico:\n{title}\n\n{text[:3000]}"
+        prompt = f"""
+Você é um redator profissional especializado em notícias para Telegram.
+
+Produza um resumo jornalístico com base na notícia abaixo.
+
+Regras:
+- Um único parágrafo com 4 a 6 frases
+- Comece direto pelo fato principal
+- Linguagem clara, objetiva e informativa
+- Inclua contexto relevante
+- Inclua possíveis impactos ou desdobramentos
+- Texto fluido e natural
+
+Restrições:
+- Sem emojis
+- Sem hashtags
+- Sem aspas
+- Sem markdown
+- Evite caracteres como <, >, &
+
+Notícia:
+{title}
+
+{text[:3000]}
+"""
 
         resp = await asyncio.wait_for(
             client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=200
+                max_tokens=300,
+                temperature=0.7
             ),
             timeout=15
         )
@@ -112,16 +137,15 @@ def get_cache(url):
 
 def save_cache(url, t, r, f):
     with get_db() as conn:
-        conn.execute("INSERT OR IGNORE INTO cache VALUES (?,?,?,?)", (url,t,r,f))
+        conn.execute("INSERT OR IGNORE INTO cache VALUES (?,?,?,?)", (url, t, r, f))
         conn.commit()
 
 # ================= FORMAT =================
-def format_post(title, resumo, fonte, url):
+def format_post(title, resumo, url):
     return (
         f"<b>📰 {escape(title)}</b>\n\n"
         f"<blockquote><i>{escape(resumo)}</i></blockquote>\n\n"
-        f"🔗 Leia mais:\n{url}\n\n"
-        f"<i>{escape(fonte)}</i>"
+        f"{url}"
     )
 
 # ================= HANDLER =================
@@ -136,7 +160,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cached = get_cache(url)
     if cached:
         t, r, f = cached
-        await update.message.reply_text(format_post(t,r,f,url), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            format_post(t, r, url),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False
+        )
         return
 
     msg = await update.message.reply_text("Processando...")
@@ -155,7 +183,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_cache(url, title, resumo, fonte)
 
-    await msg.edit_text(format_post(title,resumo,fonte,url), parse_mode=ParseMode.HTML)
+    await msg.edit_text(
+        format_post(title, resumo, url),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=False
+    )
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,6 +203,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+    logging.info("Bot rodando...")
 
     app.run_polling()
 

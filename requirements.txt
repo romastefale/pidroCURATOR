@@ -1,7 +1,8 @@
-pyTelegramBotAPI>=4.15.0
-requests>=2.31.0
-trafilatura>=1.8.0
-cloudscraper>=1.2.71
-beautifulsoup4>=4.12.3
-google-genai>=0.3.0
-lxml>=5.1.0
+python-telegram-bot==20.7
+requests==2.31.0
+trafilatura==1.9.0
+cloudscraper==1.2.71
+beautifulsoup4==4.12.3
+lxml==5.2.1
+httpx==0.25.2
+google-generativeai==0.5.4

@@ -163,9 +163,9 @@ def formatar(titulo, resumo, fonte, link):
     invisible_link = f'<a href="{link}">&#8203;</a>'
 
     return (
-        f"<b>📰 {titulo}</b>\n\n"
-        f"<blockquote><i>{resumo}</i></blockquote>\n\n"
-        f"Fonte: <i>{fonte}</i>\n"
+        f"<b>{titulo}</b>\n"
+        f"<blockquote><i>{resumo}</i></blockquote>\n"
+        f"<i>Fonte: {fonte}</i>\n"
         f"{invisible_link}"
     )
 

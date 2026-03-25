@@ -158,7 +158,7 @@ def formatar(titulo, resumo, fonte, link):
     return (
         f"<b>{titulo}</b>\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n"
-        f"<i>Fonte: {fonte}</i>\n"
+        f"<i>Fonte: {fonte}</i>"
         f'<a href="{link}">&#8203;</a>'
     )
 

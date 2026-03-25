@@ -1,236 +1,189 @@
 import os
+import json
 import logging
-import time
-import re
-from urllib.parse import urlparse
-
 import requests
-import cloudscraper
 import trafilatura
+import cloudscraper
+import html
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
+import telebot
+from google import genai
+from google.genai import types
 
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
-# ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_ID = os.getenv("ADMIN_ID")
-
-if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not ADMIN_ID:
-    raise ValueError("Variáveis de ambiente obrigatórias não definidas.")
-
-ADMIN_ID = int(ADMIN_ID)
-
+# ================= CONFIGURAÇÃO DE LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-}
+# ================= SERVIDOR DUMMY (PARA O RAILWAY) =================
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write("Bot Ativo".encode("utf-8"))
+    def log_message(self, format, *args):
+        pass
 
+def run_dummy_server():
+    port = int(os.environ.get("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    logging.info(f"Servidor Dummy rodando na porta {port}")
+    server.serve_forever()
 
-# ================= SCRAPING =================
-def scrape(url: str) -> str:
+# ================= CONFIGURAÇÕES E CHAVES =================
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not TOKEN:
+    logging.error("A variável de ambiente TELEGRAM_TOKEN não foi encontrada!")
+    exit(1)
+
+# Inicializa o bot
+bot = telebot.TeleBot(TOKEN, threaded=True)
+
+# Inicializa o cliente do Gemini (Ajustado para API v1 estável)
+client = None
+if GEMINI_API_KEY:
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            return response.text
+        client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={'api_version': 'v1'}
+        )
     except Exception as e:
-        logging.warning(f"requests erro: {e}")
+        logging.error(f"Erro ao configurar cliente Gemini: {e}")
+else:
+    logging.warning("GEMINI_API_KEY não encontrada!")
+
+# ================= INTEGRAÇÃO GEMINI =================
+def summarize_text(title, text):
+    if not client:
+        return "⚠️ Erro interno: GEMINI_API_KEY não está configurada."
+
+    system_prompt = (
+        "Você é um editor-chefe de jornalismo rigoroso e imparcial. "
+        "Sua tarefa é ler o texto bruto de uma matéria e reescrevê-lo em um post atraente para o Telegram. "
+        "REGRAS ABSOLUTAS: "
+        "1. Use APENAS as informações explícitas no texto fornecido. "
+        "2. NUNCA adicione dados externos. "
+        "3. O seu resumo DEVE conter: 📌 Mais detalhes, 📊 Impacto e 🔎 Contexto."
+    )
+
+    user_prompt = f"TÍTULO ORIGINAL: {title}\n\nTEXTO BRUTO:\n{text}"
 
     try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            return response.text
+        # Chamada ajustada com Safety Settings para evitar erros de bloqueio
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.2,
+                safety_settings=[
+                    types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+                ]
+            ),
+        )
+        
+        if not response.text:
+            return "❌ O Gemini não conseguiu processar esta notícia (conteúdo possivelmente bloqueado)."
+            
+        return response.text.strip()
     except Exception as e:
-        logging.error(f"cloudscraper erro: {e}")
+        logging.error(f"Erro no Gemini: {e}")
+        return "❌ Ocorreu um erro ao processar o resumo com a Inteligência Artificial."
 
-    return ""
+# ================= SCRAPER =================
+def scrape(url):
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
 
-
-# ================= EXTRAÇÃO =================
-def extrair(html: str):
-    titulo = "Sem título"
-    texto = ""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    }
 
     try:
-        downloaded = trafilatura.extract(html, include_comments=False)
-        if downloaded and len(downloaded) > 200:
-            texto = downloaded
+        logging.info(f"Iniciando scraping para: {url}")
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        html_content = r.text
     except Exception as e:
-        logging.warning(f"trafilatura erro: {e}")
-
-    if not texto:
+        logging.warning(f"Request falhou, tentando cloudscraper: {e}")
         try:
-            soup = BeautifulSoup(html, "html.parser")
-
-            for tag in soup(["script", "style"]):
-                tag.decompose()
-
-            if soup.title and soup.title.string:
-                titulo = soup.title.string.strip()
-
-            paragraphs = soup.find_all("p")
-            texto = " ".join(p.get_text(strip=True) for p in paragraphs)
-
-        except Exception as e:
-            logging.error(f"BeautifulSoup erro: {e}")
+            scraper = cloudscraper.create_scraper()
+            r = scraper.get(url, headers=headers, timeout=15)
+            html_content = r.text
+        except Exception as e2:
+            logging.error(f"Cloudscraper falhou: {e2}")
+            return None
 
     try:
-        meta = trafilatura.extract_metadata(html)
-        if meta and meta.title:
-            titulo = meta.title.strip()
+        data = trafilatura.extract(html_content, output_format="json")
+        if data:
+            parsed = json.loads(data)
+            if parsed.get("text"):
+                return parsed
     except:
         pass
 
-    return titulo, texto
-
-
-# ================= RESUMO =================
-def resumir(texto: str) -> str:
-    if not texto or len(texto) < 200:
-        return "Texto insuficiente para gerar resumo."
-
-    texto = texto[:6000]
-
-    prompt = f"""
-Resuma a seguinte notícia em português.
-
-Regras:
-- Um único parágrafo
-- 4 a 6 frases
-- Linguagem jornalística
-- Comece direto pelo fato principal
-
-Texto:
-{texto}
-"""
-
-    for tentativa in range(2):
-        try:
-            from google import genai
-
-            client = genai.Client(api_key=GEMINI_API_KEY)
-
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt
-            )
-
-            if response and response.text:
-                resumo = response.text.strip()
-                if len(resumo) > 50:
-                    return resumo
-
-        except Exception as e:
-            logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
-            time.sleep(2)
-
+    # Fallback simples com BeautifulSoup
     try:
-        frases = re.split(r'(?<=[.!?]) +', texto)
-        resumo = " ".join(frases[:5]).strip()
-        if resumo:
-            return resumo
-    except Exception as e:
-        logging.error(f"Fallback erro: {e}")
-
-    return "Não foi possível gerar o resumo."
-
-
-# ================= UTIL =================
-def get_fonte_nome(url: str) -> str:
-    try:
-        dominio = urlparse(url).netloc.replace("www.", "")
-        nome = dominio.split(".")[0]
-        return nome.capitalize()
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = " ".join([p.get_text() for p in soup.find_all("p")])
+        if len(text) > 200:
+            return {"title": soup.title.string if soup.title else "Notícia", "text": text}
     except:
-        return "Fonte"
+        return None
 
+# ================= HANDLERS =================
+@bot.message_handler(commands=['start'])
+def start_message(message):
+    bot.reply_to(message, "🤖 Envie o link da notícia para eu gerar o resumo...")
 
-def formatar(titulo, resumo, fonte, link):
-    # link invisível para forçar instant view
-    invisible_link = f'<a href="{link}">&#8203;</a>'
-
-    return (
-        f"<b>📰 {titulo}</b>\n\n"
-        f"<blockquote><i>{resumo}</i></blockquote>\n\n"
-        f"Fonte: <i>{fonte}</i>\n"
-        f"{invisible_link}"
-    )
-
-
-# ================= TELEGRAM =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso não autorizado.")
-        return
-
-    await update.message.reply_text("Envie um link de notícia.")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso não autorizado.")
-        return
-
-    url = update.message.text.strip()
-
+@bot.message_handler(func=lambda message: True)
+def handle_link(message):
+    url = message.text.strip()
     if not url.startswith("http"):
-        await update.message.reply_text("Envie um link válido.")
         return
 
-    await update.message.reply_text("🔎 Processando...")
-
-    try:
-        html = scrape(url)
-
-        if not html:
-            await update.message.reply_text("Erro ao acessar o site.")
-            return
-
-        titulo, texto = extrair(html)
-
-        if not texto:
-            await update.message.reply_text("Erro ao extrair conteúdo.")
-            return
-
-        resumo = resumir(texto)
-        fonte = get_fonte_nome(url)
-
-        mensagem = formatar(titulo, resumo, fonte, url)
-
-        await update.message.reply_text(
-            mensagem,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False  # necessário para instant view
+    msg_status = bot.reply_to(message, "⏳ Lendo o link da notícia...")
+    resultado = scrape(url)
+    
+    if resultado and resultado.get("text"):
+        titulo = resultado.get("title", "Sem Título")
+        texto_bruto = resultado.get("text", "")
+        
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="🧠 Resumindo conteúdo...")
+        
+        texto_resumido = summarize_text(titulo, texto_bruto)
+        
+        titulo_escapado = html.escape(titulo)
+        texto_html = html.escape(texto_resumido)
+        
+        if len(texto_html) > 3500:
+            texto_html = texto_html[:3500] + "..."
+        
+        resposta = (
+            f'<a href="{url}">&#8203;</a>'
+            f"<b>{titulo_escapado}</b>\n\n"
+            f"<blockquote>{texto_html}</blockquote>"
         )
+        
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text=resposta, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Erro no envio: {e}")
+            bot.send_message(message.chat.id, "❌ Erro ao formatar mensagem.")
+    else:
+        bot.edit_message_text(chat_id=message.chat.id, message_id=msg_status.message_id, text="❌ Falha ao extrair texto do link.")
 
-    except Exception as e:
-        logging.exception("Erro geral")
-        await update.message.reply_text("Erro interno ao processar.")
-
-
-# ================= MAIN =================
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logging.info("Bot iniciado...")
-    app.run_polling()
-
-
+# ================= INICIALIZAÇÃO =================
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    logging.info("Bot rodando...")
+    bot.infinity_polling()

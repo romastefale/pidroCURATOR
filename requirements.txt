@@ -4,3 +4,4 @@ trafilatura>=1.8.0
 cloudscraper>=1.2.71
 beautifulsoup4>=4.12.3
 google-genai>=0.3.0
+lxml>=5.1.0

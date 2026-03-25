@@ -1,6 +1,6 @@
 pyTelegramBotAPI
 requests
-cloudscraper
 trafilatura
+cloudscraper
 beautifulsoup4
-google-generativeai
+google-genai

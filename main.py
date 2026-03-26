@@ -163,7 +163,7 @@ def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
     return (
         f"<b>{titulo}</b>\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n"
-        f"<i>Via: {fonte}</i>\n"
+        f"<i>Via: {fonte}</i>"
         f'<a href="{link}">&#8203;</a>' # Link invisível para gerar preview
     )
 

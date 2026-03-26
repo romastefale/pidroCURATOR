@@ -20,7 +20,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-from google import genai  # <-- movido para topo
+from google import genai
 
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -32,7 +32,6 @@ if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not ADMIN_ID:
 
 ADMIN_ID = int(ADMIN_ID)
 
-# Cliente Gemini criado uma vez (mais estável)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(
@@ -110,12 +109,17 @@ def extrair(html: str):
 
     return titulo, texto
 
-# ================= RESUMO =================
+# ================= RESUMO (CORRIGIDO) =================
 def resumir(texto: str) -> str:
     if not texto or len(texto) < 200:
         return "Texto insuficiente para gerar resumo."
 
     texto = texto[:6000]
+
+    def parece_copia(resumo, original):
+        inicio = original[:500].lower()
+        resumo_limpo = resumo.lower().strip()
+        return resumo_limpo in inicio or inicio.startswith(resumo_limpo[:100])
 
     prompt = f"""
 Resuma a notícia abaixo em português seguindo EXATAMENTE:
@@ -124,13 +128,15 @@ Resuma a notícia abaixo em português seguindo EXATAMENTE:
 - Apenas 1 parágrafo
 - Máximo de 300 caracteres
 - Linguagem jornalística objetiva
-- Não adicionar informações
+- REESCREVA com suas próprias palavras
+- NÃO copie frases do texto original
+- NÃO comece igual ao texto original
 
 Texto:
 {texto}
 """
 
-    for tentativa in range(2):
+    for tentativa in range(3):
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -139,7 +145,6 @@ Texto:
 
             resumo = ""
 
-            # 🔥 compatível com Gemini 2.x
             if response:
                 if hasattr(response, "text") and response.text:
                     resumo = response.text
@@ -151,17 +156,30 @@ Texto:
 
             if resumo:
                 resumo = resumo.strip()
-                return resumo[:300]  # limite real
+
+                if parece_copia(resumo, texto):
+                    logging.warning("Resumo rejeitado (cópia detectada), tentando novamente...")
+                    continue
+
+                resumo = re.sub(r'\s+', ' ', resumo)
+
+                return resumo[:300]
 
         except Exception as e:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
-            time.sleep(2)
+            time.sleep(1)
 
-    # fallback controlado
     try:
         frases = re.split(r'(?<=[.!?]) +', texto)
-        resumo = " ".join(frases[:2]).strip()
+        frases = frases[:2]
+
+        resumo = " ".join(frases).strip()
+
+        resumo = resumo.replace("Segundo", "De acordo com")
+        resumo = resumo.replace("De acordo com", "Conforme")
+
         return resumo[:300]
+
     except Exception as e:
         logging.error(f"Fallback erro: {e}")
 

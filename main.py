@@ -41,30 +41,4 @@ logging.basicConfig(
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-}
-
-# ================= TECLADOS INLINE =================
-def get_admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Publicar", callback_data="publicar_sim")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")]
-    ])
-
-# ================= SCRAPING =================
-def scrape(url: str) -> str:
-    """Tenta baixar o HTML da página usando requests e cloudscraper como fallback."""
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        if response.status_code == 200:
-            return response.text
-    except Exception as e:
-        logging.warning(f"Requests falhou, tentando cloudscraper. Erro: {e}")
-
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=15)
-        if response.status_code == 200:
-            return response.text
-    except Exception as e:
-        logging.error(f"Cloudscraper falhou
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x6

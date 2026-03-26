@@ -131,15 +131,14 @@ def resumir(texto: str) -> str:
         texto = " ".join(frases[2:])
 
     prompt = f"""
-Resuma a notícia abaixo em português seguindo EXATAMENTE:
+Leia a notícia abaixo em português e use o conteúdo para entregar um resumo seguindo EXATAMENTE ESSES PARÂMETROS:
 
 - Máximo de 3 frases
-- Apenas 1 parágrafo
 - Máximo de 300 caracteres
 - Linguagem jornalística objetiva
 - NÃO copiar trechos do início do texto
 - NÃO repetir frases do texto
-- Reescrever com suas próprias palavras
+- Reescrever e resumir com suas próprias palavras
 
 Texto:
 {texto}

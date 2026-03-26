@@ -46,12 +46,10 @@ HEADERS = {
 
 # ================= TECLADOS INLINE =================
 def get_admin_keyboard():
+    # Botão de editar foi removido daqui
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Publicar", callback_data="publicar_sim")],
-        [
-            InlineKeyboardButton("📝 Editar", callback_data="edit"),
-            InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")
-        ]
+        [InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")]
     ])
 
 # ================= SCRAPING =================
@@ -184,28 +182,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto_msg = update.message.text.strip() if update.message.text else ""
 
-    # 1. FLUXO: Recebendo edição de texto do admin
-    if context.user_data.get('is_editing'):
-        # update.message.text_html pega a formatação visual e converte para tags HTML limpas
-        texto_editado_html = update.message.text_html
-        
-        # Recupera o link original para garantir o preview da notícia
-        link = context.user_data.get('link_original', '')
-        if link and link not in texto_editado_html:
-            texto_editado_html += f'<a href="{link}">&#8203;</a>'
-
-        context.user_data['mensagem'] = texto_editado_html
-        context.user_data['is_editing'] = False
-        
-        await update.message.reply_text("✅ <b>Texto atualizado!</b> Confira como ficou:", parse_mode=ParseMode.HTML)
-        await update.message.reply_text(
-            context.user_data['mensagem'],
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    # 2. FLUXO: Aguardando ID do canal para publicar
+    # 1. FLUXO: Aguardando ID do canal para publicar
     if context.user_data.get("aguardando_id"):
         if texto_msg.lower() == "cancelar":
             context.user_data.clear()
@@ -231,7 +208,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # 3. FLUXO: Recebendo uma nova URL
+    # 2. FLUXO: Recebendo uma nova URL
     if texto_msg.startswith("http"):
         context.user_data.clear() 
         msg_processamento = await update.message.reply_text("🔎 Baixando e analisando a notícia...")
@@ -286,23 +263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "publicar_sim":
         context.user_data["aguardando_id"] = True
-        context.user_data['is_editing'] = False
         await query.message.edit_text("🔢 Envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n<i>Ou digite 'cancelar' para abortar.</i>", parse_mode=ParseMode.HTML)
-    
-    elif query.data == "edit":
-        text_to_edit = context.user_data.get('mensagem', '')
-        if text_to_edit:
-            context.user_data['is_editing'] = True
-            await query.message.edit_text(
-                "👇 <b>Copie a mensagem abaixo, cole na sua caixa de texto, faça as edições (mantendo a formatação visual) e me envie de volta:</b>",
-                parse_mode=ParseMode.HTML
-            )
-            await query.message.reply_text(
-                text_to_edit,
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await query.message.edit_text("❌ Nenhuma mensagem encontrada para edição. Envie o link novamente.")
     
     elif query.data == "publicar_nao":
         context.user_data.clear()

@@ -72,14 +72,15 @@ def scrape(url: str) -> str:
 
     return ""
 
-# ================= EXTRAÇÃO =================
+# ================= EXTRAÇÃO (CORRIGIDA) =================
 def extrair(html: str):
     titulo = "Sem título"
     texto = ""
 
     try:
         downloaded = trafilatura.extract(html, include_comments=False)
-        if downloaded and len(downloaded) > 200:
+        # 🔥 agora exige texto mais completo
+        if downloaded and len(downloaded) > 1000:
             texto = downloaded
     except Exception as e:
         logging.warning(f"trafilatura erro: {e}")
@@ -95,7 +96,10 @@ def extrair(html: str):
                 titulo = soup.title.string.strip()
 
             paragraphs = soup.find_all("p")
-            texto = " ".join(p.get_text(strip=True) for p in paragraphs)
+
+            # 🔥 concatenação melhor
+            texto = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
+            texto = re.sub(r'\s+', ' ', texto)
 
         except Exception as e:
             logging.error(f"BeautifulSoup erro: {e}")
@@ -109,17 +113,15 @@ def extrair(html: str):
 
     return titulo, texto
 
-# ================= RESUMO (CORRIGIDO) =================
+# ================= RESUMO =================
 def resumir(texto: str) -> str:
     if not texto or len(texto) < 200:
         return "Texto insuficiente para gerar resumo."
 
     texto = texto[:6000]
 
-    def parece_copia(resumo, original):
-        inicio = original[:500].lower()
-        resumo_limpo = resumo.lower().strip()
-        return resumo_limpo in inicio or inicio.startswith(resumo_limpo[:100])
+    # 🔥 remove início fraco da matéria
+    texto = re.sub(r'^.{0,300}', '', texto)
 
     prompt = f"""
 Resuma a notícia abaixo em português seguindo EXATAMENTE:
@@ -128,15 +130,13 @@ Resuma a notícia abaixo em português seguindo EXATAMENTE:
 - Apenas 1 parágrafo
 - Máximo de 300 caracteres
 - Linguagem jornalística objetiva
-- REESCREVA com suas próprias palavras
-- NÃO copie frases do texto original
-- NÃO comece igual ao texto original
+- Não adicionar informações
 
 Texto:
 {texto}
 """
 
-    for tentativa in range(3):
+    for tentativa in range(2):
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -156,30 +156,16 @@ Texto:
 
             if resumo:
                 resumo = resumo.strip()
-
-                if parece_copia(resumo, texto):
-                    logging.warning("Resumo rejeitado (cópia detectada), tentando novamente...")
-                    continue
-
-                resumo = re.sub(r'\s+', ' ', resumo)
-
                 return resumo[:300]
 
         except Exception as e:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
-            time.sleep(1)
+            time.sleep(2)
 
     try:
         frases = re.split(r'(?<=[.!?]) +', texto)
-        frases = frases[:2]
-
-        resumo = " ".join(frases).strip()
-
-        resumo = resumo.replace("Segundo", "De acordo com")
-        resumo = resumo.replace("De acordo com", "Conforme")
-
+        resumo = " ".join(frases[:2]).strip()
         return resumo[:300]
-
     except Exception as e:
         logging.error(f"Fallback erro: {e}")
 

@@ -110,41 +110,41 @@ def extrair(html: str):
 
     return titulo, texto
 
-# ================= RESUMO =================
+# ================= RESUMO (CORRIGIDO FINAL) =================
 def resumir(texto: str) -> str:
     if not texto or len(texto) < 200:
         return "Texto insuficiente para gerar resumo."
 
-    texto = texto[:6000]
+    # normaliza
+    texto = re.sub(r'\s+', ' ', texto)
 
-    # ✅ remove duplicações comuns
-    partes = texto.split(". ")
-    partes_unicas = []
-    for p in partes:
-        if p not in partes_unicas:
-            partes_unicas.append(p)
-    texto = ". ".join(partes_unicas)
-
-    # ✅ remove apenas as 2 primeiras frases (lead)
     frases = re.split(r'(?<=[.!?]) +', texto)
-    if len(frases) > 5:
-        texto = " ".join(frases[2:])
+
+    # remove início e fim (onde costuma ter lead e repetição)
+    if len(frases) > 8:
+        inicio = len(frases) // 4
+        fim = len(frases) - inicio
+        base = " ".join(frases[inicio:fim])
+    else:
+        base = texto
+
+    base = base[:6000]
 
     prompt = f"""
-Leia a notícia abaixo em português e use o conteúdo para entregar um resumo seguindo EXATAMENTE ESSES PARÂMETROS:
+Resuma a notícia com base no conteúdo principal.
 
-- Máximo de 3 frases
-- Máximo de 300 caracteres
-- Linguagem jornalística objetiva
-- NÃO copiar trechos do início do texto
-- NÃO repetir frases do texto
-- Reescrever e resumir com suas próprias palavras
+Regras:
+- Não usar o início do texto
+- Não copiar frases
+- Reescrever completamente
+- Máximo 300 caracteres
+- Linguagem jornalística
 
 Texto:
-{texto}
+{base}
 """
 
-    for tentativa in range(2):
+    for tentativa in range(3):
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -164,20 +164,31 @@ Texto:
 
             if resumo:
                 resumo = resumo.strip()
+
+                # comparação forte com início
+                inicio_original = " ".join(frases[:3]).lower()
+                inicio_original = re.sub(r'[^\w\s]', '', inicio_original)
+
+                teste = resumo.lower()
+                teste = re.sub(r'[^\w\s]', '', teste)
+
+                # se parecer com início → descarta
+                if any(palavra in inicio_original for palavra in teste.split()[:10]):
+                    continue
+
                 return resumo[:300]
 
         except Exception as e:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
             time.sleep(2)
 
-    # ✅ fallback melhor (não usa início)
+    # fallback (meio do texto)
     try:
-        frases = re.split(r'(?<=[.!?]) +', texto)
         meio = len(frases) // 2
         resumo = " ".join(frases[meio:meio+2]).strip()
         return resumo[:300]
-    except Exception as e:
-        logging.error(f"Fallback erro: {e}")
+    except:
+        pass
 
     return "Não foi possível gerar o resumo."
 

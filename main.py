@@ -72,14 +72,13 @@ def scrape(url: str) -> str:
 
     return ""
 
-# ================= EXTRAÇÃO (CORRIGIDA) =================
+# ================= EXTRAÇÃO =================
 def extrair(html: str):
     titulo = "Sem título"
     texto = ""
 
     try:
         downloaded = trafilatura.extract(html, include_comments=False)
-        # 🔥 agora exige texto mais completo
         if downloaded and len(downloaded) > 1000:
             texto = downloaded
     except Exception as e:
@@ -96,8 +95,6 @@ def extrair(html: str):
                 titulo = soup.title.string.strip()
 
             paragraphs = soup.find_all("p")
-
-            # 🔥 concatenação melhor
             texto = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
             texto = re.sub(r'\s+', ' ', texto)
 
@@ -120,8 +117,18 @@ def resumir(texto: str) -> str:
 
     texto = texto[:6000]
 
-    # 🔥 remove início fraco da matéria
-    texto = re.sub(r'^.{0,300}', '', texto)
+    # ✅ remove duplicações comuns
+    partes = texto.split(". ")
+    partes_unicas = []
+    for p in partes:
+        if p not in partes_unicas:
+            partes_unicas.append(p)
+    texto = ". ".join(partes_unicas)
+
+    # ✅ remove apenas as 2 primeiras frases (lead)
+    frases = re.split(r'(?<=[.!?]) +', texto)
+    if len(frases) > 5:
+        texto = " ".join(frases[2:])
 
     prompt = f"""
 Resuma a notícia abaixo em português seguindo EXATAMENTE:
@@ -130,7 +137,9 @@ Resuma a notícia abaixo em português seguindo EXATAMENTE:
 - Apenas 1 parágrafo
 - Máximo de 300 caracteres
 - Linguagem jornalística objetiva
-- Não adicionar informações
+- NÃO copiar trechos do início do texto
+- NÃO repetir frases do texto
+- Reescrever com suas próprias palavras
 
 Texto:
 {texto}
@@ -162,9 +171,11 @@ Texto:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
             time.sleep(2)
 
+    # ✅ fallback melhor (não usa início)
     try:
         frases = re.split(r'(?<=[.!?]) +', texto)
-        resumo = " ".join(frases[:2]).strip()
+        meio = len(frases) // 2
+        resumo = " ".join(frases[meio:meio+2]).strip()
         return resumo[:300]
     except Exception as e:
         logging.error(f"Fallback erro: {e}")
@@ -310,4 +321,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    main()

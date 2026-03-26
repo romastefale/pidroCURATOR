@@ -40,7 +40,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# A linha abaixo foi corrigida para garantir que a string vai até o final e fecha com aspas
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
@@ -50,6 +49,12 @@ def get_admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Publicar", callback_data="publicar_sim")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")]
+    ])
+
+def get_hashtags_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ Pular", callback_data="pular_hashtags")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar_acao")]
     ])
 
 # ================= SCRAPING =================
@@ -167,14 +172,11 @@ def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
 
 def processar_hashtags(texto_entrada: str) -> str:
     """Limpa a entrada do usuário e formata as hashtags corretamente."""
-    # Substitui vírgulas e pontos e vírgulas por espaços
     texto_limpo = texto_entrada.replace(",", " ").replace(";", " ")
-    # Divide nos espaços em branco
     palavras = texto_limpo.split()
     
     tags = []
     for palavra in palavras:
-        # Adiciona a '#' se o usuário não tiver colocado
         if not palavra.startswith("#"):
             tags.append(f"#{palavra}")
         else:
@@ -197,7 +199,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto_msg = update.message.text.strip() if update.message.text else ""
 
-    # 1. FLUXO: Aguardando Hashtags
+    # 1. FLUXO: Aguardando Hashtags (via texto)
     if context.user_data.get("aguardando_hashtags"):
         if texto_msg.lower() == "cancelar":
             context.user_data.clear()
@@ -205,15 +207,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         if texto_msg.lower() != "pular":
-            # Processa as tags e adiciona acima do título da mensagem
             hashtags_formatadas = processar_hashtags(texto_msg)
-            mensagem_antiga = context.user_data["mensagem"]
+            mensagem_antiga = context.user_data.get("mensagem", "")
             context.user_data["mensagem"] = f"{hashtags_formatadas}\n\n{mensagem_antiga}"
             
-        # Avança para o próximo estado
         context.user_data["aguardando_hashtags"] = False
         context.user_data["aguardando_id"] = True
-        await update.message.reply_text("🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n<i>Ou digite 'cancelar' para abortar.</i>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).", parse_mode=ParseMode.HTML)
         return
 
     # 2. FLUXO: Aguardando ID do canal para publicar
@@ -258,17 +258,15 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg_processamento.edit_text("❌ Erro: Não encontrei texto útil nesta página.")
                 return
 
-            await msg_processamento.edit_text("🧠 Gerando Gerando resumo com IA...")
+            await msg_processamento.edit_text("🧠 Gerando resumo com IA...")
             resumo = resumir(texto_extraido)
             fonte = get_fonte_nome(texto_msg)
             
             mensagem_final = formatar(titulo, resumo, fonte, texto_msg)
             
-            # Salvando os dados na sessão
             context.user_data["mensagem"] = mensagem_final
             context.user_data["link_original"] = texto_msg 
 
-            # Remove a mensagem de processamento
             await msg_processamento.delete()
             
             await update.message.reply_text(
@@ -299,12 +297,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["aguardando_hashtags"] = True
         await query.message.edit_text(
             "#️⃣ Deseja colocar <b>hashtags</b> na publicação?\n\n"
-            "Envie as tags (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
-            "<i>Digite 'pular' para postar sem tags ou 'cancelar' para abortar.</i>", 
-            parse_mode=ParseMode.HTML
+            "Envie as tags digitando aqui no chat (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
+            "<i>Ou use os botões abaixo para pular ou cancelar.</i>", 
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_hashtags_keyboard()
         )
     
-    elif query.data == "publicar_nao":
+    elif query.data == "pular_hashtags":
+        context.user_data["aguardando_hashtags"] = False
+        context.user_data["aguardando_id"] = True
+        await query.message.edit_text(
+            "⏭️ <i>Hashtags ignoradas.</i>\n\n"
+            "🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n"
+            "<i>Ou digite 'cancelar' para abortar.</i>", 
+            parse_mode=ParseMode.HTML
+        )
+
+    elif query.data in ["publicar_nao", "cancelar_acao"]:
         context.user_data.clear()
         await query.message.edit_text("❌ Ação cancelada pelo usuário. Pode enviar o próximo link!")
 

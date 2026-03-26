@@ -175,7 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     context.user_data.clear()
-    await update.message.reply_text("🤖 <b>pidroCURATOR ativo!</b>\n\n<i>📝 Envie o link de uma notícia para começarmos.</i>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("🤖 <b>pidroCURATOR está ativo!</b>\n\n<i>📝 Envie o link de uma notícia para começarmos.</i>", parse_mode=ParseMode.HTML)
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_ID:

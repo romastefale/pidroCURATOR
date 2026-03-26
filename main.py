@@ -40,7 +40,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# A linha abaixo foi corrigida para garantir que a string vai até o final e fecha com aspas
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 }
@@ -54,7 +53,6 @@ def get_admin_keyboard():
 
 # ================= SCRAPING =================
 def scrape(url: str) -> str:
-    """Tenta baixar o HTML da página usando requests e cloudscraper como fallback."""
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
@@ -74,11 +72,9 @@ def scrape(url: str) -> str:
 
 # ================= EXTRAÇÃO DE TEXTO =================
 def extrair(html: str):
-    """Extrai título e texto limpo do HTML."""
     titulo = "Sem título"
     texto = ""
 
-    # Tentativa 1: Trafilatura
     try:
         texto_extraido = trafilatura.extract(html, include_comments=False)
         if texto_extraido and len(texto_extraido) > 200:
@@ -90,11 +86,9 @@ def extrair(html: str):
     except Exception as e:
         logging.warning(f"Erro no trafilatura: {e}")
 
-    # Tentativa 2: Fallback para BeautifulSoup
     if not texto:
         try:
             soup = BeautifulSoup(html, "html.parser")
-            
             for tag in soup(["script", "style", "nav", "footer", "aside"]):
                 tag.decompose()
 
@@ -104,7 +98,6 @@ def extrair(html: str):
             paragraphs = soup.find_all("p")
             texto = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
             texto = re.sub(r'\s+', ' ', texto).strip()
-
         except Exception as e:
             logging.error(f"Erro no BeautifulSoup: {e}")
 
@@ -112,7 +105,6 @@ def extrair(html: str):
 
 # ================= RESUMO COM GEMINI =================
 def resumir(texto: str) -> str:
-    """Usa o Gemini para gerar um resumo limpo e direto da notícia."""
     if not texto or len(texto) < 150:
         return "Texto insuficiente para gerar resumo."
 
@@ -133,8 +125,9 @@ def resumir(texto: str) -> str:
     """
 
     try:
+        # CORREÇÃO: "gemini-2.5-flash" não existe (ainda). Use "gemini-2.0-flash" ou "gemini-1.5-flash"
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash", 
+            model="gemini-2.0-flash", 
             contents=prompt
         )
         
@@ -149,7 +142,6 @@ def resumir(texto: str) -> str:
 
 # ================= UTILIDADES =================
 def get_fonte_nome(url: str) -> str:
-    """Extrai o nome do domínio principal para usar como Fonte."""
     try:
         dominio = urlparse(url).netloc.replace("www.", "")
         nome = dominio.split(".")[0]
@@ -158,7 +150,6 @@ def get_fonte_nome(url: str) -> str:
         return "Web"
 
 def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
-    """Monta a estrutura HTML da mensagem para o Telegram."""
     return (
         f"<b>{titulo}</b>\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n"
@@ -167,15 +158,11 @@ def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
     )
 
 def processar_hashtags(texto_entrada: str) -> str:
-    """Limpa a entrada do usuário e formata as hashtags corretamente."""
-    # Substitui vírgulas e pontos e vírgulas por espaços
     texto_limpo = texto_entrada.replace(",", " ").replace(";", " ")
-    # Divide nos espaços em branco
     palavras = texto_limpo.split()
     
     tags = []
     for palavra in palavras:
-        # Adiciona a '#' se o usuário não tiver colocado
         if not palavra.startswith("#"):
             tags.append(f"#{palavra}")
         else:
@@ -198,30 +185,25 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     texto_msg = update.message.text.strip() if update.message.text else ""
 
-    # 1. FLUXO: Aguardando Hashtags
     if context.user_data.get("aguardando_hashtags"):
         if texto_msg.lower() == "cancelar":
             context.user_data.clear()
             await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
             return
             
-        if texto_msg.lower() != "pular":
-            # Processa as tags e adiciona acima do título da mensagem
-            hashtags_formatadas = processar_hashtags(texto_msg)
-            mensagem_antiga = context.user_data["mensagem"]
-            context.user_data["mensagem"] = f"{hashtags_formatadas}\n\n{mensagem_antiga}"
+        hashtags_formatadas = processar_hashtags(texto_msg)
+        mensagem_antiga = context.user_data["mensagem"]
+        context.user_data["mensagem"] = f"{hashtags_formatadas}\n\n{mensagem_antiga}"
             
-        # Avança para o próximo estado
         context.user_data["aguardando_hashtags"] = False
         context.user_data["aguardando_id"] = True
-        await update.message.reply_text("🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n<i>Ou digite 'cancelar' para abortar.</i>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal).\n\n<i>Ou 'cancelar'.</i>", parse_mode=ParseMode.HTML)
         return
 
-    # 2. FLUXO: Aguardando ID do canal para publicar
     if context.user_data.get("aguardando_id"):
         if texto_msg.lower() == "cancelar":
             context.user_data.clear()
-            await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
+            await update.message.reply_text("❌ Publicação cancelada.")
             return
 
         canal_id = texto_msg
@@ -234,16 +216,11 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📢 Post enviado com sucesso para {canal_id}!")
         except Exception as e:
             logging.error(f"Erro ao enviar para o canal: {e}")
-            await update.message.reply_text(
-                "❌ Erro ao publicar. Verifique:\n"
-                "1. Se o ID está correto (ex: @meucanal ou -100123...)\n"
-                "2. Se o bot é administrador do canal."
-            )
+            await update.message.reply_text("❌ Erro ao publicar. Verifique o ID e se o bot é admin.")
         
         context.user_data.clear()
         return
 
-    # 3. FLUXO: Recebendo uma nova URL
     if texto_msg.startswith("http"):
         context.user_data.clear() 
         msg_processamento = await update.message.reply_text("🔎 Baixando e analisando a notícia...")
@@ -251,84 +228,68 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             html = scrape(texto_msg)
             if not html:
-                await msg_processamento.edit_text("❌ Erro: Não foi possível acessar o conteúdo deste site (bloqueio ou fora do ar).")
+                await msg_processamento.edit_text("❌ Erro: Não foi possível acessar o conteúdo.")
                 return
 
             titulo, texto_extraido = extrair(html)
             if not texto_extraido:
-                await msg_processamento.edit_text("❌ Erro: Não encontrei texto útil nesta página.")
+                await msg_processamento.edit_text("❌ Erro: Não encontrei texto útil.")
                 return
 
-            await msg_processamento.edit_text("🧠 Gerando Gerando resumo com IA...")
+            await msg_processamento.edit_text("🧠 Gerando resumo com IA...")
             resumo = resumir(texto_extraido)
             fonte = get_fonte_nome(texto_msg)
             
             mensagem_final = formatar(titulo, resumo, fonte, texto_msg)
-            
-            # Salvando os dados na sessão
             context.user_data["mensagem"] = mensagem_final
             context.user_data["link_original"] = texto_msg 
 
-            # Remove a mensagem de processamento
             await msg_processamento.delete()
-            
-            await update.message.reply_text(
-                mensagem_final,
-                parse_mode=ParseMode.HTML
-            )
-
-            await update.message.reply_text(
-                "📣 O que deseja fazer com esta notícia?",
-                reply_markup=get_admin_keyboard()
-            )
+            await update.message.reply_text(mensagem_final, parse_mode=ParseMode.HTML)
+            await update.message.reply_text("📣 O que deseja fazer?", reply_markup=get_admin_keyboard())
             
         except Exception as e:
-            logging.exception("Erro geral no processamento do link")
-            await msg_processamento.edit_text("❌ Ocorreu um erro interno ao processar este link.")
+            logging.exception("Erro geral")
+            await msg_processamento.edit_text("❌ Ocorreu um erro interno.")
     else:
-        await update.message.reply_text("⚠️ Comando não reconhecido. Por favor, envie um link válido (começando com http/https).")
+        await update.message.reply_text("⚠️ Envie um link válido.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     if query.from_user.id != ADMIN_ID:
-        await query.message.reply_text("⛔ Acesso não autorizado.")
         return
 
- if query.data == "publicar_sim":
+    # CORREÇÃO: Adicionados os casos para "pular_tags" e "cancelar_tags"
+    if query.data == "publicar_sim":
         context.user_data["aguardando_hashtags"] = True
-        
-        # Cria os botões solicitados
-        botoes = [
-            [
-                InlineKeyboardButton("⏩ Pular", callback_data="pular_tags"),
-                InlineKeyboardButton("✖️ Cancelar", callback_data="cancelar_tags")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(botoes)
-
+        botoes = [[
+            InlineKeyboardButton("⏩ Pular", callback_data="pular_tags"),
+            InlineKeyboardButton("✖️ Cancelar", callback_data="cancelar_tags")
+        ]]
         await query.message.edit_text(
-            "#️⃣ Deseja colocar <b>hashtags</b> na publicação?\n\n"
-            "Envie as tags no chat (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
-            "<i>Ou escolha uma das opções abaixo:</i>", 
+            "#️⃣ Envie as **hashtags** no chat ou escolha uma opção:",
             parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(botoes)
         )
     
-    elif query.data == "publicar_nao":
+    elif query.data == "pular_tags":
+        context.user_data["aguardando_hashtags"] = False
+        context.user_data["aguardando_id"] = True
+        await query.message.edit_text("🔢 Envie o <b>ID do canal</b>:", parse_mode=ParseMode.HTML)
+
+    elif query.data == "cancelar_tags" or query.data == "publicar_nao":
         context.user_data.clear()
-        await query.message.edit_text("❌ Ação cancelada pelo usuário. Pode enviar o próximo link!")
+        await query.message.edit_text("❌ Ação cancelada.")
 
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
-
-    logging.info("Bot iniciado com sucesso e aguardando links...")
+    logging.info("Bot iniciado...")
     app.run_polling()
 
 if __name__ == "__main__":

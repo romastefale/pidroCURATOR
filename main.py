@@ -174,7 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     context.user_data.clear()
-    await update.message.reply_text("🤖 <b>Bot ativo!</b>\n📝 Envie o link de uma notícia para começarmos.", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("🤖 <b>pidroCURATOR ativo!</b>\n\n<i>📝 Envie o link de uma notícia para começarmos.</i>", parse_mode=ParseMode.HTML)
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_ID:
@@ -263,7 +263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "publicar_sim":
         context.user_data["aguardando_id"] = True
-        await query.message.edit_text("🔢 Envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n<i>Ou digite 'cancelar' para abortar.</i>", parse_mode=ParseMode.HTML)
+        await query.message.edit_text("🔢 Envie o <b>ID do canal</b> <i>(ex: @meucanal ou -100...).</i>", parse_mode=ParseMode.HTML)
     
     elif query.data == "publicar_nao":
         context.user_data.clear()

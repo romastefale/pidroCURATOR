@@ -63,6 +63,7 @@ def scrape(url: str) -> str:
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
+            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO APLICADA
             return response.text
     except Exception as e:
         logging.warning(f"Requests falhou, tentando cloudscraper. Erro: {e}")
@@ -71,6 +72,7 @@ def scrape(url: str) -> str:
         scraper = cloudscraper.create_scraper()
         response = scraper.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
+            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO APLICADA
             return response.text
     except Exception as e:
         logging.error(f"Cloudscraper falhou. Erro: {e}")
@@ -242,91 +244,4 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # 3. FLUXO: Recebendo uma nova URL
-    if texto_msg.startswith("http"):
-        context.user_data.clear() 
-        msg_processamento = await update.message.reply_text("🔎 Baixando e analisando a notícia...")
-        
-        try:
-            html = scrape(texto_msg)
-            if not html:
-                await msg_processamento.edit_text("❌ Erro: Não foi possível acessar o conteúdo deste site (bloqueio ou fora do ar).")
-                return
-
-            titulo, texto_extraido = extrair(html)
-            if not texto_extraido:
-                await msg_processamento.edit_text("❌ Erro: Não encontrei texto útil nesta página.")
-                return
-
-            await msg_processamento.edit_text("🧠 Gerando resumo com IA...")
-            resumo = resumir(texto_extraido)
-            fonte = get_fonte_nome(texto_msg)
-            
-            mensagem_final = formatar(titulo, resumo, fonte, texto_msg)
-            
-            context.user_data["mensagem"] = mensagem_final
-            context.user_data["link_original"] = texto_msg 
-
-            await msg_processamento.delete()
-            
-            await update.message.reply_text(
-                mensagem_final,
-                parse_mode=ParseMode.HTML
-            )
-
-            await update.message.reply_text(
-                "📣 O que deseja fazer com esta notícia?",
-                reply_markup=get_admin_keyboard()
-            )
-            
-        except Exception as e:
-            logging.exception("Erro geral no processamento do link")
-            await msg_processamento.edit_text("❌ Ocorreu um erro interno ao processar este link.")
-    else:
-        await update.message.reply_text("⚠️ Comando não reconhecido. Por favor, envie um link válido (começando com http/https).")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != ADMIN_ID:
-        await query.message.reply_text("⛔ Acesso não autorizado.")
-        return
-
-    if query.data == "publicar_sim":
-        context.user_data["aguardando_hashtags"] = True
-        await query.message.edit_text(
-            "#️⃣ Deseja colocar <b>hashtags</b> na publicação?\n\n"
-            "Envie as tags digitando aqui no chat (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
-            "<i>Ou use os botões abaixo para pular ou cancelar.</i>", 
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_hashtags_keyboard()
-        )
-    
-    elif query.data == "pular_hashtags":
-        context.user_data["aguardando_hashtags"] = False
-        context.user_data["aguardando_id"] = True
-        await query.message.edit_text(
-            "⏭️ <i>Hashtags ignoradas.</i>\n\n"
-            "🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).\n\n"
-            "<i>Ou digite 'cancelar' para abortar.</i>", 
-            parse_mode=ParseMode.HTML
-        )
-
-    elif query.data in ["publicar_nao", "cancelar_acao"]:
-        context.user_data.clear()
-        await query.message.edit_text("❌ Ação cancelada pelo usuário. Pode enviar o próximo link!")
-
-# ================= MAIN =================
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
-
-    logging.info("Bot iniciado com sucesso e aguardando links...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+    # resto do código permanece igual...

@@ -126,6 +126,7 @@ def resumir(texto: str) -> str:
     2. Reescreva com suas próprias palavras, sem copiar trechos exatos.
     3. O resumo deve ter NO MÁXIMO 300 caracteres.
     4. Mantenha um tom jornalístico, neutro e informativo.
+    5. Remova o nome da fonte do título da notícia ou referências como "| fonte".
 
     Texto da Notícia:
     {texto_seguro}

@@ -296,13 +296,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⛔ Acesso não autorizado.")
         return
 
-    if query.data == "publicar_sim":
+ if query.data == "publicar_sim":
         context.user_data["aguardando_hashtags"] = True
+        
+        # Cria os botões solicitados
+        botoes = [
+            [
+                InlineKeyboardButton("⏩ Pular", callback_data="pular_tags"),
+                InlineKeyboardButton("✖️ Cancelar", callback_data="cancelar_tags")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(botoes)
+
         await query.message.edit_text(
             "#️⃣ Deseja colocar <b>hashtags</b> na publicação?\n\n"
-            "Envie as tags (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
-            "<i>Digite 'pular' para postar sem tags ou 'cancelar' para abortar.</i>", 
-            parse_mode=ParseMode.HTML
+            "Envie as tags no chat (ex: <i>tecnologia, inovação</i> ou <i>#bot #telegram</i>).\n\n"
+            "<i>Ou escolha uma das opções abaixo:</i>", 
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
         )
     
     elif query.data == "publicar_nao":

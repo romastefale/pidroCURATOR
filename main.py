@@ -161,9 +161,9 @@ def get_fonte_nome(url: str) -> str:
 def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
     """Monta a estrutura HTML da mensagem para o Telegram."""
     return (
-        f"<b>{titulo}</b>\n\n"
-        f"<blockquote><i>{resumo}</i></blockquote>\n\n"
-        f"<i>Fonte: {fonte}</i>\n"
+        f"<b>{titulo}</b>\n"
+        f"<blockquote><i>{resumo}</i></blockquote>\n"
+        f"<i>Via: {fonte}</i>\n"
         f'<a href="{link}">&#8203;</a>' # Link invisível para gerar preview
     )
 

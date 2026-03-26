@@ -20,6 +20,8 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
+from google import genai  # <-- movido para topo
+
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -29,6 +31,9 @@ if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not ADMIN_ID:
     raise ValueError("Variáveis de ambiente obrigatórias não definidas.")
 
 ADMIN_ID = int(ADMIN_ID)
+
+# Cliente Gemini criado uma vez (mais estável)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,13 +118,13 @@ def resumir(texto: str) -> str:
     texto = texto[:6000]
 
     prompt = f"""
-Resuma a notícia abaixo em português seguindo EXATAMENTE estas regras:
+Resuma a notícia abaixo em português seguindo EXATAMENTE:
 
-- Máximo de 3 frases no total
+- Máximo de 3 frases
 - Apenas 1 parágrafo
-- Texto curto (máximo 300 caracteres)
+- Máximo de 300 caracteres
 - Linguagem jornalística objetiva
-- Não adicione informações novas
+- Não adicionar informações
 
 Texto:
 {texto}
@@ -127,29 +132,36 @@ Texto:
 
     for tentativa in range(2):
         try:
-            from google import genai
-
-            client = genai.Client(api_key=GEMINI_API_KEY)
-
-            response = client.models.generate_content(
-                model="gemini-2.0-flash", # Ajustado para o modelo disponível
+            response = gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
                 contents=prompt
             )
 
-            if response and response.text:
-                resumo = response.text.strip()
-                if len(resumo) > 50:
-                    return resumo
+            resumo = ""
+
+            # 🔥 compatível com Gemini 2.x
+            if response:
+                if hasattr(response, "text") and response.text:
+                    resumo = response.text
+                else:
+                    try:
+                        resumo = response.candidates[0].content.parts[0].text
+                    except:
+                        pass
+
+            if resumo:
+                resumo = resumo.strip()
+                return resumo[:300]  # limite real
 
         except Exception as e:
             logging.warning(f"Gemini erro (tentativa {tentativa+1}): {e}")
             time.sleep(2)
 
+    # fallback controlado
     try:
         frases = re.split(r'(?<=[.!?]) +', texto)
-        resumo = " ".join(frases[:5]).strip()
-        if resumo:
-            return resumo
+        resumo = " ".join(frases[:2]).strip()
+        return resumo[:300]
     except Exception as e:
         logging.error(f"Fallback erro: {e}")
 
@@ -184,7 +196,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_ID:
         return
 
-    # 1. Interceptação da Edição (Regra prioritária)
     if update.message.text and context.user_data.get('is_editing'):
         context.user_data['mensagem'] = update.message.text_html
         context.user_data['is_editing'] = False
@@ -200,7 +211,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 2. Aguardando ID do Canal para Publicação
     if context.user_data.get("aguardando_id"):
         canal_id = update.message.text.strip()
         try:
@@ -218,7 +228,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return
 
-    # 3. Fluxo Normal de Processamento de Link
     texto_msg = update.message.text.strip() if update.message.text else ""
     if texto_msg.startswith("http"):
         await update.message.reply_text("🔎 Processando...")
@@ -291,7 +300,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    # O MessageHandler(filters.ALL) agora gerencia o fluxo de links, IDs e Edições via message_router
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_router))
 
     logging.info("Bot iniciado...")

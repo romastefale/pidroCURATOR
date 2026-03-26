@@ -113,14 +113,13 @@ def resumir(texto: str) -> str:
     texto = texto[:6000]
 
     prompt = f"""
-Reescreva resumindo a seguinte notícia em português.
+Resuma a notícia abaixo em português seguindo EXATAMENTE estas regras:
 
-Siga as regras estritamente:
-- 1 parágrafo
-- 2 frases
-- 2 linhas
-- Linguagem jornalística
-- Comece direto pelo fato principal
+- Máximo de 3 frases no total
+- Apenas 1 parágrafo
+- Texto curto (máximo 300 caracteres)
+- Linguagem jornalística objetiva
+- Não adicione informações novas
 
 Texto:
 {texto}

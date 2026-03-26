@@ -113,7 +113,7 @@ def extrair(html: str):
 
     return titulo, texto
 
-# ================= RESUMO (A MÁGICA ACONTECE AQUI) =================
+# ================= RESUMO COM GEMINI =================
 def resumir(texto: str) -> str:
     """Usa o Gemini para gerar um resumo limpo e direto da notícia."""
     if not texto or len(texto) < 150:
@@ -136,7 +136,6 @@ def resumir(texto: str) -> str:
     """
 
     try:
-        # Usando o modelo flash que é rápido e excelente para resumos
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash", 
             contents=prompt
@@ -176,7 +175,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Acesso não autorizado.")
         return
     
-    # Limpa estados ao iniciar
     context.user_data.clear()
     await update.message.reply_text("🤖 <b>Bot ativo!</b>\n📝 Envie o link de uma notícia para começarmos.", parse_mode=ParseMode.HTML)
 
@@ -188,8 +186,15 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1. FLUXO: Recebendo edição de texto do admin
     if context.user_data.get('is_editing'):
-        # Salva o texto em HTML exatamente como o admin enviou/editou
-        context.user_data['mensagem'] = update.message.text_html
+        # update.message.text_html pega a formatação visual e converte para tags HTML limpas
+        texto_editado_html = update.message.text_html
+        
+        # Recupera o link original para garantir o preview da notícia
+        link = context.user_data.get('link_original', '')
+        if link and link not in texto_editado_html:
+            texto_editado_html += f'<a href="{link}">&#8203;</a>'
+
+        context.user_data['mensagem'] = texto_editado_html
         context.user_data['is_editing'] = False
         
         await update.message.reply_text("✅ <b>Texto atualizado!</b> Confira como ficou:", parse_mode=ParseMode.HTML)
@@ -202,7 +207,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. FLUXO: Aguardando ID do canal para publicar
     if context.user_data.get("aguardando_id"):
-        # Se o usuário desistiu e mandou "cancelar"
         if texto_msg.lower() == "cancelar":
             context.user_data.clear()
             await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
@@ -229,7 +233,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. FLUXO: Recebendo uma nova URL
     if texto_msg.startswith("http"):
-        # Limpa qualquer estado perdido
         context.user_data.clear() 
         msg_processamento = await update.message.reply_text("🔎 Baixando e analisando a notícia...")
         
@@ -249,15 +252,19 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fonte = get_fonte_nome(texto_msg)
             
             mensagem_final = formatar(titulo, resumo, fonte, texto_msg)
+            
+            # Salvando os dados na sessão
             context.user_data["mensagem"] = mensagem_final
+            context.user_data["link_original"] = texto_msg 
 
-            # Envia a prévia
+            # Remove a mensagem de processamento para deixar o chat limpo
+            await msg_processamento.delete()
+            
             await update.message.reply_text(
                 mensagem_final,
                 parse_mode=ParseMode.HTML
             )
 
-            # Envia o teclado de opções
             await update.message.reply_text(
                 "📣 O que deseja fazer com esta notícia?",
                 reply_markup=get_admin_keyboard()
@@ -267,7 +274,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.exception("Erro geral no processamento do link")
             await msg_processamento.edit_text("❌ Ocorreu um erro interno ao processar este link.")
     else:
-        # Se não é URL e não estávamos esperando edição nem ID
         await update.message.reply_text("⚠️ Comando não reconhecido. Por favor, envie um link válido (começando com http/https).")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,7 +314,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    # Captura todas as mensagens de texto que não são comandos
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
 
     logging.info("Bot iniciado com sucesso e aguardando links...")

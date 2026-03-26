@@ -118,7 +118,7 @@ def resumir(texto: str) -> str:
         return "Texto insuficiente para gerar resumo."
 
     # Limita o tamanho do texto para economizar tokens e focar no conteúdo principal
-    texto_seguro = texto[:15000]
+    texto_seguro = texto[:20000]
 
     prompt = f"""
     Você é um jornalista experiente. Crie um resumo direto e objetivo da notícia abaixo.
@@ -126,7 +126,8 @@ def resumir(texto: str) -> str:
     Regras estritas:
     1. Vá direto ao ponto. Não use frases como "A notícia fala sobre...".
     2. Reescreva com suas próprias palavras, sem copiar trechos exatos.
-    3. O resumo deve ter NO MÁXIMO 300 caracteres.
+    3. Não omita informações, seja conciso e de fácil entendimento.
+    3. O resumo deve ter NO MÁXIMO 400 caracteres.
     4. Mantenha um tom jornalístico, neutro e informativo.
 
     Texto da Notícia:

@@ -59,11 +59,10 @@ def get_hashtags_keyboard():
 
 # ================= SCRAPING =================
 def scrape(url: str) -> str:
-    """Tenta baixar o HTML da página usando requests e cloudscraper como fallback."""
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
-            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO APLICADA
+            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO
             return response.text
     except Exception as e:
         logging.warning(f"Requests falhou, tentando cloudscraper. Erro: {e}")
@@ -72,20 +71,18 @@ def scrape(url: str) -> str:
         scraper = cloudscraper.create_scraper()
         response = scraper.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
-            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO APLICADA
+            response.encoding = response.apparent_encoding  # ✅ CORREÇÃO
             return response.text
     except Exception as e:
         logging.error(f"Cloudscraper falhou. Erro: {e}")
 
     return ""
 
-# ================= EXTRAÇÃO DE TEXTO =================
+# ================= EXTRAÇÃO =================
 def extrair(html: str):
-    """Extrai título e texto limpo do HTML."""
     titulo = "Sem título"
     texto = ""
 
-    # Tentativa 1: Trafilatura
     try:
         texto_extraido = trafilatura.extract(html, include_comments=False)
         if texto_extraido and len(texto_extraido) > 200:
@@ -97,7 +94,6 @@ def extrair(html: str):
     except Exception as e:
         logging.warning(f"Erro no trafilatura: {e}")
 
-    # Tentativa 2: Fallback para BeautifulSoup
     if not texto:
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -117,9 +113,8 @@ def extrair(html: str):
 
     return titulo, texto
 
-# ================= RESUMO COM GEMINI =================
+# ================= RESUMO =================
 def resumir(texto: str) -> str:
-    """Usa o Gemini para gerar um resumo limpo e direto da notícia."""
     if not texto or len(texto) < 150:
         return "Texto insuficiente para gerar resumo."
 
@@ -127,44 +122,33 @@ def resumir(texto: str) -> str:
 
     prompt = f"""
     Você é um jornalista experiente. Crie um resumo direto e objetivo da notícia abaixo.
-    
-    Regras estritas:
-    1. Vá direto ao ponto. Não use frases como "A notícia fala sobre...".
-    2. Reescreva com suas próprias palavras, sem copiar trechos exatos.
-    3. O resumo deve ter NO MÁXIMO 300 caracteres.
-    4. Mantenha um tom jornalístico, neutro e informativo.
+    Máximo 300 caracteres.
 
-    Texto da Notícia:
+    Texto:
     {texto_seguro}
     """
 
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash", 
+            model="gemini-2.5-flash",
             contents=prompt
         )
-        
         if response.text:
             return response.text.strip()
-            
     except Exception as e:
-        logging.error(f"Erro na API do Gemini: {e}")
-        return "Erro ao processar o resumo com a Inteligência Artificial."
+        logging.error(f"Erro Gemini: {e}")
 
-    return "Não foi possível gerar o resumo."
+    return "Erro ao gerar resumo."
 
-# ================= UTILIDADES =================
+# ================= UTIL =================
 def get_fonte_nome(url: str) -> str:
-    """Extrai o nome do domínio principal para usar como Fonte."""
     try:
         dominio = urlparse(url).netloc.replace("www.", "")
-        nome = dominio.split(".")[0]
-        return nome.capitalize()
+        return dominio.split(".")[0].capitalize()
     except:
         return "Web"
 
-def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
-    """Monta a estrutura HTML da mensagem para o Telegram."""
+def formatar(titulo, resumo, fonte, link):
     return (
         f"<b>{titulo}</b>\n"
         f"<blockquote><i>{resumo}</i></blockquote>\n"
@@ -172,76 +156,49 @@ def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
         f'<a href="{link}">&#8203;</a>'
     )
 
-def processar_hashtags(texto_entrada: str) -> str:
-    """Limpa a entrada do usuário e formata as hashtags corretamente."""
-    texto_limpo = texto_entrada.replace(",", " ").replace(";", " ")
-    palavras = texto_limpo.split()
-    
-    tags = []
-    for palavra in palavras:
-        if not palavra.startswith("#"):
-            tags.append(f"#{palavra}")
-        else:
-            tags.append(palavra)
-            
-    return " ".join(tags)
+def processar_hashtags(texto):
+    palavras = texto.replace(",", " ").split()
+    return " ".join([p if p.startswith("#") else f"#{p}" for p in palavras])
 
-# ================= HANDLERS DO TELEGRAM =================
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso não autorizado.")
-        return
-    
+        return await update.message.reply_text("⛔ Acesso não autorizado.")
+
     context.user_data.clear()
-    await update.message.reply_text("🤖 <b>Bot ativo!</b>\n📝 Envie o link de uma notícia para começarmos.", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("Envie um link.")
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_ID:
         return
 
-    texto_msg = update.message.text.strip() if update.message.text else ""
+    texto_msg = update.message.text.strip()
 
-    # 1. FLUXO: Aguardando Hashtags (via texto)
-    if context.user_data.get("aguardando_hashtags"):
-        if texto_msg.lower() == "cancelar":
-            context.user_data.clear()
-            await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
-            return
-            
-        if texto_msg.lower() != "pular":
-            hashtags_formatadas = processar_hashtags(texto_msg)
-            mensagem_antiga = context.user_data.get("mensagem", "")
-            context.user_data["mensagem"] = f"{hashtags_formatadas}\n\n{mensagem_antiga}"
-            
-        context.user_data["aguardando_hashtags"] = False
-        context.user_data["aguardando_id"] = True
-        await update.message.reply_text("🔢 Agora envie o <b>ID do canal</b> (ex: @meucanal ou -100...).", parse_mode=ParseMode.HTML)
-        return
+    if texto_msg.startswith("http"):
+        msg = await update.message.reply_text("Processando...")
 
-    # 2. FLUXO: Aguardando ID do canal para publicar
-    if context.user_data.get("aguardando_id"):
-        if texto_msg.lower() == "cancelar":
-            context.user_data.clear()
-            await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
-            return
+        html = scrape(texto_msg)
+        if not html:
+            return await msg.edit_text("Erro ao acessar.")
 
-        canal_id = texto_msg
-        try:
-            await context.bot.send_message(
-                chat_id=canal_id,
-                text=context.user_data["mensagem"],
-                parse_mode=ParseMode.HTML
-            )
-            await update.message.reply_text(f"📢 Post enviado com sucesso para {canal_id}!")
-        except Exception as e:
-            logging.error(f"Erro ao enviar para o canal: {e}")
-            await update.message.reply_text(
-                "❌ Erro ao publicar. Verifique:\n"
-                "1. Se o ID está correto (ex: @meucanal ou -100123...)\n"
-                "2. Se o bot é administrador do canal."
-            )
-        
-        context.user_data.clear()
-        return
+        titulo, texto = extrair(html)
+        resumo = resumir(texto)
+        fonte = get_fonte_nome(texto_msg)
 
-    # resto do código permanece igual...
+        final = formatar(titulo, resumo, fonte, texto_msg)
+
+        await msg.delete()
+        await update.message.reply_text(final, parse_mode=ParseMode.HTML)
+
+# ================= MAIN =================
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+
+    logging.info("Rodando...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

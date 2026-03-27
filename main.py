@@ -50,7 +50,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data.clear()
     await update.message.reply_text(
-        "🤖 <b>pidroCURATOR está ativo!</b>\n\n<i>📝 Envie o link de uma notícia para começarmos.</i>",
+        "🤖 <b>pidroCURATOR está on!</b>\n\n<i>📝 Envie o link de uma notícia para começarmos.</i>",
         parse_mode=ParseMode.HTML
     )
 

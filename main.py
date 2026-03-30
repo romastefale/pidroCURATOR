@@ -1,224 +1,285 @@
 import os
-import re
-import time
-import asyncio
 import logging
+import re
+from urllib.parse import urlparse
+
 import requests
-import hashlib
-import html
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+import cloudscraper
+import trafilatura
+from bs4 import BeautifulSoup
 
-from telegram import (
-    Update,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    LinkPreviewOptions
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
 from telegram.ext import (
-    Application,
-    InlineQueryHandler,
-    MessageHandler,
+    ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
-    filters
+    filters,
+    CallbackQueryHandler,
 )
 
-# =========================
-# CONFIGURAÇÃO E LOGGING
-# =========================
+# Utilizando o novo SDK oficial do Google
+from google import genai
+
+# ================= CONFIGURAÇÕES =================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not ADMIN_ID:
+    raise ValueError("Variáveis de ambiente (TELEGRAM_TOKEN, GEMINI_API_KEY, ADMIN_ID) não definidas.")
+
+ADMIN_ID = int(ADMIN_ID)
+
+# Inicializa o cliente do Gemini
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", TOKEN.replace(":", "")[:20] if TOKEN else None)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-try:
-    PORT = int(os.getenv("PORT", 8443))
-except (ValueError, TypeError):
-    PORT = 8443
-
-session = requests.Session()
-music_cache = {}  
-_executor = ThreadPoolExecutor(max_workers=4)
-
-# =========================
-# CONTROLE DO /log
-# =========================
-log_sessions = {}
-
-# =========================
-# SANITIZAÇÃO DE IDIOMAS PROIBIDOS
-# =========================
-FORBIDDEN_ALPHABETS_REGEX = re.compile(
-    r'['
-    r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'
-    r'\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F'
-    r'\u4E00-\u9FFF\u3400-\u4DBF\U00020000-\U0002A6DF'
-    r'\u0900-\u097F'
-    r'\u0980-\u09FF'
-    r']'
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-def contains_forbidden(text):
-    if not text: return False
-    return bool(FORBIDDEN_ALPHABETS_REGEX.search(text))
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+}
 
-def sanitize_text(text):
-    if not text: return text
-    if not contains_forbidden(text): return text
-    
+# ================= TECLADOS INLINE =================
+def get_admin_keyboard():
+    # Botão de editar foi removido daqui
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Publicar", callback_data="publicar_sim")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="publicar_nao")]
+    ])
+
+# ================= SCRAPING =================
+def scrape(url: str) -> str:
+    """Tenta baixar o HTML da página usando requests e cloudscraper como fallback."""
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text}
-        resp = session.get(url, params=params, timeout=3)
-        if resp.status_code == 200:
-            translated = "".join([sentence[0] for sentence in resp.json()[0]])
-            if not contains_forbidden(translated):
-                return translated.strip()
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code == 200:
+            return response.text
     except Exception as e:
-        logger.error(f"Erro na tradução automática: {e}")
+        logging.warning(f"Requests falhou, tentando cloudscraper. Erro: {e}")
+
+    try:
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(url, headers=HEADERS, timeout=15)
+        if response.status_code == 200:
+            return response.text
+    except Exception as e:
+        logging.error(f"Cloudscraper falhou. Erro: {e}")
+
+    return ""
+
+# ================= EXTRAÇÃO DE TEXTO =================
+def extrair(html: str):
+    """Extrai título e texto limpo do HTML."""
+    titulo = "Sem título"
+    texto = ""
+
+    # Tentativa 1: Trafilatura (Excelente para artigos/notícias)
+    try:
+        texto_extraido = trafilatura.extract(html, include_comments=False)
+        if texto_extraido and len(texto_extraido) > 200:
+            texto = texto_extraido
+            
+        meta = trafilatura.extract_metadata(html)
+        if meta and meta.title:
+            titulo = meta.title.strip()
+    except Exception as e:
+        logging.warning(f"Erro no trafilatura: {e}")
+
+    # Tentativa 2: Fallback para BeautifulSoup se o Trafilatura falhar
+    if not texto:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Limpa tags indesejadas
+            for tag in soup(["script", "style", "nav", "footer", "aside"]):
+                tag.decompose()
+
+            if soup.title and soup.title.string:
+                titulo = soup.title.string.strip()
+
+            paragraphs = soup.find_all("p")
+            texto = " ".join(p.get_text(" ", strip=True) for p in paragraphs)
+            texto = re.sub(r'\s+', ' ', texto).strip()
+
+        except Exception as e:
+            logging.error(f"Erro no BeautifulSoup: {e}")
+
+    return titulo, texto
+
+# ================= RESUMO COM GEMINI =================
+def resumir(texto: str) -> str:
+    """Usa o Gemini para gerar um resumo limpo e direto da notícia."""
+    if not texto or len(texto) < 150:
+        return "Texto insuficiente para gerar resumo."
+
+    # Limita o tamanho do texto para economizar tokens e focar no conteúdo principal
+    texto_seguro = texto[:20000]
+
+    prompt = f"""
+    Você é um jornalista experiente. Crie um resumo direto e objetivo da notícia abaixo.
     
-    cleaned = FORBIDDEN_ALPHABETS_REGEX.sub('', text).strip()
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned if cleaned else "Desconhecido"
+    Regras estritas:
+    1. Vá direto ao ponto. Não use frases como "A notícia fala sobre...".
+    2. Reescreva com suas próprias palavras, sem copiar trechos exatos.
+    3. Não omita informações, seja conciso e de fácil entendimento.
+    3. O resumo deve ter NO MÁXIMO 280 caracteres.
+    4. Mantenha um tom jornalístico, neutro e informativo.
 
-# =========================
-# COMANDO /log
-# =========================
-async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    Texto da Notícia:
+    {texto_seguro}
+    """
+
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents=prompt
+        )
+        
+        if response.text:
+            return response.text.strip()
+            
+    except Exception as e:
+        logging.error(f"Erro na API do Gemini: {e}")
+        return "Erro ao processar o resumo com a Inteligência Artificial."
+
+    return "Não foi possível gerar o resumo."
+
+# ================= UTILIDADES =================
+def get_fonte_nome(url: str) -> str:
+    """Extrai o nome do domínio principal para usar como Fonte."""
+    try:
+        dominio = urlparse(url).netloc.replace("www.", "")
+        nome = dominio.split(".")[0]
+        return nome.capitalize()
+    except:
+        return "Web"
+
+def formatar(titulo: str, resumo: str, fonte: str, link: str) -> str:
+    """Monta a estrutura HTML da mensagem para o Telegram."""
+    return (
+        f"<b>{titulo}</b>\n"
+        f"<blockquote><i>{resumo}</i></blockquote>\n"
+        f"<i>Via: {fonte}</i>"
+        f'<a href="{link}">&#8203;</a>' # Link invisível para gerar preview
+    )
+
+# ================= HANDLERS DO TELEGRAM =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Acesso não autorizado.")
+        return
+    
+    context.user_data.clear()
+    await update.message.reply_text("⚠️🤖 <b>pidroCURATOR está ativo!</b>\n\n<i>📲📝Envie o link de uma notícia para começarmos.</i>", parse_mode=ParseMode.HTML)
+
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_user.id != ADMIN_ID:
         return
 
-    log_sessions[update.effective_user.id] = {"step": "waiting_text"}
-    await update.message.reply_text("📝Qual texto de <i>Update</i> você deseja enviar?", parse_mode=ParseMode.HTML)
+    texto_msg = update.message.text.strip() if update.message.text else ""
 
-async def handle_log_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+    # 1. FLUXO: Aguardando ID do canal para publicar
+    if context.user_data.get("aguardando_id"):
+        if texto_msg.lower() == "cancelar":
+            context.user_data.clear()
+            await update.message.reply_text("❌ Publicação cancelada. Envie um novo link.")
+            return
+
+        canal_id = texto_msg
+        try:
+            await context.bot.send_message(
+                chat_id=canal_id,
+                text=context.user_data["mensagem"],
+                parse_mode=ParseMode.HTML
+            )
+            await update.message.reply_text(f"📢 Post enviado com sucesso para {canal_id}!")
+        except Exception as e:
+            logging.error(f"Erro ao enviar para o canal: {e}")
+            await update.message.reply_text(
+                "❌ Erro ao publicar. Verifique:\n"
+                "1. Se o ID está correto (ex: @meucanal ou -100123...)\n"
+                "2. Se o bot é administrador do canal."
+            )
+        
+        context.user_data.clear()
         return
 
-    session_data = log_sessions.get(user_id)
-    if not session_data:
-        return
+    # 2. FLUXO: Recebendo uma nova URL
+    if texto_msg.startswith("http"):
+        context.user_data.clear() 
+        msg_processamento = await update.message.reply_text("🔎 Baixando e analisando a notícia...")
+        
+        try:
+            html = scrape(texto_msg)
+            if not html:
+                await msg_processamento.edit_text("❌ Erro: Não foi possível acessar o conteúdo deste site (bloqueio ou fora do ar).")
+                return
 
-    if session_data["step"] == "waiting_text":
-        session_data["message"] = update.message
-        session_data["step"] = "confirm"
+            titulo, texto_extraido = extrair(html)
+            if not texto_extraido:
+                await msg_processamento.edit_text("❌ Erro: Não encontrei texto útil nesta página.")
+                return
 
-        # reenviar exatamente igual
-        await update.message.copy(chat_id=update.effective_chat.id)
+            await msg_processamento.edit_text("🧠 Gerando resumo com IA...")
+            resumo = resumir(texto_extraido)
+            fonte = get_fonte_nome(texto_msg)
+            
+            mensagem_final = formatar(titulo, resumo, fonte, texto_msg)
+            
+            # Salvando os dados na sessão
+            context.user_data["mensagem"] = mensagem_final
+            context.user_data["link_original"] = texto_msg 
 
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🆗 Correto", callback_data="log_ok"),
-                InlineKeyboardButton("✏️ Editar...", callback_data="log_edit")
-            ]
-        ])
+            # Remove a mensagem de processamento para deixar o chat limpo
+            await msg_processamento.delete()
+            
+            await update.message.reply_text(
+                mensagem_final,
+                parse_mode=ParseMode.HTML
+            )
 
-        await update.message.reply_text("🆗Correto?", reply_markup=markup)
+            await update.message.reply_text(
+                "📣 O que deseja fazer com esta notícia?",
+                reply_markup=get_admin_keyboard()
+            )
+            
+        except Exception as e:
+            logging.exception("Erro geral no processamento do link")
+            await msg_processamento.edit_text("❌ Ocorreu um erro interno ao processar este link.")
+    else:
+        await update.message.reply_text("⚠️ Comando não reconhecido. Por favor, envie um link válido (começando com http/https).")
 
-async def cb_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-
-    if user_id != ADMIN_ID:
-        return
-
     await query.answer()
 
-    if query.data == "log_ok":
-        log_sessions.pop(user_id, None)
-        await query.edit_message_text("✅ Enviado com sucesso!")
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("⛔ Acesso não autorizado.")
+        return
 
-    elif query.data == "log_edit":
-        log_sessions[user_id] = {"step": "waiting_text"}
-        await query.edit_message_text("📝Qual texto de <i>Update</i> você deseja enviar?", parse_mode=ParseMode.HTML)
+    if query.data == "publicar_sim":
+        context.user_data["aguardando_id"] = True
+        await query.message.edit_text("🔢 Envie o <b>ID do canal</b> <i>(ex: @meucanal ou -100...).</i>", parse_mode=ParseMode.HTML)
+    
+    elif query.data == "publicar_nao":
+        context.user_data.clear()
+        await query.message.edit_text("❌ Ação cancelada pelo usuário. Pode enviar o próximo link!")
 
-# =========================
-# RESTANTE DO CÓDIGO (INALTERADO)
-# =========================
-
-def get_chorus_via_api(title, artist):
-    try:
-        clean_artist = re.sub(r'[\(\[].*[\)\]]', '', artist).strip()
-        clean_title = re.sub(r'[\(\[].*[\)\]]', '', title).strip()
-        url = f"https://api.lyrics.ovh/v1/{clean_artist}/{clean_title}"
-        resp = session.get(url, timeout=10)
-        
-        if resp.status_code != 200: return None
-        full_lyrics = resp.json().get("lyrics", "")
-        if not full_lyrics: return None
-        
-        if contains_forbidden(full_lyrics):
-            return "🎵 [Letra bloqueada: Idioma original não suportado neste grupo]"
-
-        parts = re.split(r'(\[Refrão\]|\[Chorus\]|Refrão:|Chorus:)', full_lyrics, flags=re.IGNORECASE)
-        if len(parts) > 1: return parts[2].strip().split('\n\n')[0]
-        stanzas = [s.strip() for s in full_lyrics.split('\n\n') if len(s.strip()) > 20]
-        if stanzas:
-            counts = Counter(stanzas)
-            most_common = counts.most_common(1)[0]
-            if most_common[1] > 1: return most_common[0]
-            return stanzas[0]
-        return full_lyrics[:250] + "..."
-    except Exception as e:
-        logger.error(f"Erro na API de Letras: {e}")
-        return None
-
-def search_deezer_sync(query):
-    query = re.sub(r"[-_]+", " ", query).strip()
-    try:
-        r = session.get("https://api.deezer.com/search", params={"q": query, "limit": 10}, timeout=5)
-        return r.json().get("data", []) if r.status_code == 200 else []
-    except Exception: return []
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "🎹 Esse é o bot do @tigrao para mostrar as músicas que voce esta ouvindo! \n\n"
-        "🎧 Para usar, basta digitar o nome da música…\n\n"
-        "📜 Se quiser a letra do refrão só pedir!"
-    )
-    await update.message.reply_text(msg)
-
-# =========================
-# MAIN
-# =========================
+# ================= MAIN =================
 def main():
-    if not TOKEN: return
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("log", cmd_log))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
 
-    app.add_handler(MessageHandler(filters.ALL, handle_log_input))
-    app.add_handler(CallbackQueryHandler(cb_log, pattern=r"^log_"))
-
-    app.add_handler(InlineQueryHandler(inline_query))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
-    app.add_handler(CallbackQueryHandler(cb_handler, pattern=r"^(c|l|s)\|"))
-
-    if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True
-        )
-    else:
-        app.run_polling(drop_pending_updates=True)
+    logging.info("Bot iniciado com sucesso e aguardando links...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

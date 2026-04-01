@@ -1,10 +1,13 @@
 import asyncio
+import json
 import logging
 import os
 import re
+from collections import deque
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional, Set
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import cloudscraper
 import requests
@@ -51,6 +54,9 @@ HEADERS = {
 JOBQUEUE_NAME = "pidrocurator_jobqueue"
 DEFAULT_POST_INTERVAL = 30
 DEFAULT_POST_TARGET = None
+JOBQUEUE_CACHE_FILE = Path(__file__).with_name("jobqueue_sent_cache.json")
+JOBQUEUE_CACHE_LIMIT = 500
+JOBQUEUE_CACHE_LOCK_KEY = "jobqueue_cache_lock"
 
 # ================= TECLADOS INLINE =================
 def get_admin_keyboard():
@@ -83,6 +89,133 @@ def _get_job_settings_from_app(application) -> Dict[str, Any]:
             "last_url": None,
         },
     )
+
+
+def _get_jobqueue_cache_state(application) -> Dict[str, Any]:
+    state = application.bot_data.setdefault(
+        "jobqueue_cache_state",
+        {
+            "loaded": False,
+            "queue": deque(maxlen=JOBQUEUE_CACHE_LIMIT),
+            "set": set(),
+        },
+    )
+
+    if not isinstance(state.get("queue"), deque):
+        state["queue"] = deque(state.get("queue", []), maxlen=JOBQUEUE_CACHE_LIMIT)
+
+    if not isinstance(state.get("set"), set):
+        state["set"] = set(state.get("set", []))
+
+    return state
+
+
+def _normalize_news_link(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "https").lower()
+        netloc = parsed.netloc.lower()
+        path = re.sub(r"/+$", "", parsed.path or "")
+        if not path:
+            path = "/"
+
+        # Remove parâmetros de rastreamento comuns sem alterar a URL principal.
+        tracking_prefixes = ("utm_",)
+        tracking_keys = {
+            "fbclid",
+            "gclid",
+            "mc_cid",
+            "mc_eid",
+            "ref",
+            "ref_src",
+            "igshid",
+            "si",
+            "feature",
+        }
+        query_items = []
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            key_lower = key.lower()
+            if key_lower in tracking_keys or key_lower.startswith(tracking_prefixes):
+                continue
+            query_items.append((key, value))
+
+        query = urlencode(query_items, doseq=True)
+        normalized = urlunparse((scheme, netloc, path, "", query, ""))
+        return normalized
+    except Exception:
+        return url.strip()
+
+
+def _load_jobqueue_dedup_cache(application) -> None:
+    state = _get_jobqueue_cache_state(application)
+    if state["loaded"]:
+        return
+
+    state["loaded"] = True
+    queue: Deque[str] = state["queue"]
+    seen: Set[str] = state["set"]
+
+    try:
+        if JOBQUEUE_CACHE_FILE.exists():
+            raw = JOBQUEUE_CACHE_FILE.read_text(encoding="utf-8").strip()
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    for item in data[-JOBQUEUE_CACHE_LIMIT:]:
+                        if isinstance(item, str):
+                            normalized = _normalize_news_link(item)
+                            if normalized and normalized not in seen:
+                                queue.append(normalized)
+                                seen.add(normalized)
+    except Exception as e:
+        logging.warning(f"Não foi possível carregar cache de notícias enviadas: {e}")
+
+
+def _persist_jobqueue_dedup_cache(application) -> None:
+    state = _get_jobqueue_cache_state(application)
+    try:
+        payload = list(state["queue"])
+        tmp_file = JOBQUEUE_CACHE_FILE.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_file.replace(JOBQUEUE_CACHE_FILE)
+    except Exception as e:
+        logging.warning(f"Não foi possível salvar cache de notícias enviadas: {e}")
+
+
+def _jobqueue_link_ja_enviado(application, link: str) -> bool:
+    _load_jobqueue_dedup_cache(application)
+    normalized = _normalize_news_link(link)
+    if not normalized:
+        return False
+    state = _get_jobqueue_cache_state(application)
+    return normalized in state["set"]
+
+
+def _registrar_jobqueue_link_enviado(application, link: str) -> None:
+    _load_jobqueue_dedup_cache(application)
+    normalized = _normalize_news_link(link)
+    if not normalized:
+        return
+
+    state = _get_jobqueue_cache_state(application)
+    queue: Deque[str] = state["queue"]
+    seen: Set[str] = state["set"]
+
+    if normalized in seen:
+        return
+
+    queue.append(normalized)
+    seen.add(normalized)
+
+    while len(queue) > JOBQUEUE_CACHE_LIMIT:
+        removed = queue.popleft()
+        seen.discard(removed)
+
+    _persist_jobqueue_dedup_cache(application)
 
 
 def _clear_jobqueue_jobs(application) -> None:
@@ -275,6 +408,10 @@ async def _executar_job_postagem(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logging.info("Job automático: link não pôde ser decodificado, ignorando.")
                 continue
 
+            if _jobqueue_link_ja_enviado(context.application, link_real):
+                logging.info("Job automático: notícia já enviada anteriormente, ignorando %s", link_real)
+                continue
+
             html = scrape(link_real)
             if not html:
                 logging.info("Job automático: falha ao baixar HTML em %s", link_real)
@@ -301,13 +438,14 @@ async def _executar_job_postagem(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode=ParseMode.HTML
                 )
                 settings["last_url"] = link_real
+                _registrar_jobqueue_link_enviado(context.application, link_real)
                 logging.info("Job automático: notícia publicada com sucesso em %s", settings["target"])
                 return
             except Exception as e:
                 logging.error(f"Erro ao publicar notícia automática: {e}")
                 return
 
-        logging.info("Job automático: nenhuma notícia passou no filtro ou pôde ser publicada.")
+        logging.info("Job automático: nenhuma notícia nova passou no filtro ou pôde ser publicada.")
 
 
 def _agendar_jobqueue(application) -> bool:
@@ -653,6 +791,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Carrega o cache de notícias enviadas para evitar repetição entre execuções do JobQueue.
+    _load_jobqueue_dedup_cache(app)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("jobqueue", jobqueue_command))

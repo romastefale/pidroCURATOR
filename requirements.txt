@@ -1,8 +1,8 @@
-python-telegram-bot[job-queue]==20.7
+python-telegram-bot[job-queue]
+google-genai
 requests
 cloudscraper
 trafilatura
 beautifulsoup4
-google-genai
 gnews
 googlenewsdecoder
